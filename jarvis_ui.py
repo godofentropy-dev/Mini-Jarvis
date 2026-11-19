@@ -6,7 +6,8 @@ import numpy as np
 from PIL import Image, ImageOps, ImageTk
 
 from reactors import (S, CX, CY, RING, R_BIG, R_SAT, ORDER, NAMES, DISPLAY, SUBTITLE, THEMES, RED, ORANGE,
-                      Compositor, corrupt_text, mix, ic, CODE_POOL, CONTAIN_SECONDS, Fx, spring_step)
+                      Compositor, corrupt_text, mix, ic, CODE_POOL, CONTAIN_SECONDS, Fx, spring_step,
+                      ORBIT_TILT, DEPTH_SCALE, DEPTH_DIM)
 from vision import grab_screen_raw
 from ui_effects import Typewriter, drawer_step, menu_icon_lines, is_inside, mood_for
 
@@ -220,6 +221,7 @@ class JarvisUI:
         self._impact = False                                     # a new assistant is on its way to the middle
         self._drift = (0.0, 0.0)                                 # the big reactor floats a little
         self.fx = Fx()                                           # embers, dust, sparks, ripples
+        print("UI: spring physics, glass reactors and 3D orbit loaded")
         self.vis_open, self.vis_scan, self._vis_job = False, False, None
         self.boot_active = self.boot_fading = False
         self._code_t = 0.0
@@ -1218,8 +1220,10 @@ class JarvisUI:
     def _place_entities(self):
         for k, e in self.ent.items():
             dx, dy = self._drift if k == self.active else (0.0, 0.0)
+            s = math.sin(e["ang"])
             e["x"] = CX + e["rad"] * math.cos(e["ang"]) + dx
-            e["y"] = CY + e["rad"] * math.sin(e["ang"]) + dy
+            e["y"] = CY + e["rad"] * s * ORBIT_TILT + dy                 # the orbit is seen at an angle
+            e["z"] = max(-1.0, min(1.0, s * e["rad"] / RING))            # depth: -1 far side ... +1 near side, 0 in the middle
 
     def _update_entities(self, dt, t, st, sleeping):
         """Glides every reactor to where it belongs: the active one to the middle, the rest on the orbit."""
@@ -1285,7 +1289,7 @@ class JarvisUI:
             if k == self.active:
                 continue
             e = self.ent[k]
-            if math.hypot(mx - e["x"], my - e["y"]) <= max(e["R"], R_SAT) * 1.35:
+            if math.hypot(mx - e["x"], my - e["y"]) <= max(e["R"] * (1.0 + DEPTH_SCALE * e["z"]), R_SAT) * 1.35:
                 return k
         return None
 
@@ -1489,9 +1493,12 @@ class JarvisUI:
         col, acc = e["col"], e["acc"]
         if main and self.g > 0.02:                       # Ultron's red creeps into the active reactor
             col, acc = mix(col, RED, 0.85 * self.g), mix(acc, ORANGE, 0.85 * self.g)
-        return dict(key=key, x=e["x"], y=e["y"], R=e["R"], col=col, acc=acc, st=st if main else "sleep",
-                    lvl=lvl if main else 0.0, contain=e["contain"], hover=(key == self.hover),
-                    ph=e["ph"], detail=e["R"] > 95, main=main)
+        z = e["z"]
+        near = 1.0 + DEPTH_DIM * z                        # far side: smaller and dimmer, near side: bigger and brighter
+        col, acc = [v * near for v in col], [v * near for v in acc]
+        return dict(key=key, x=e["x"], y=e["y"], R=e["R"] * (1.0 + DEPTH_SCALE * z), z=z, col=col, acc=acc,
+                    st=st if main else "sleep", lvl=lvl if main else 0.0, contain=e["contain"],
+                    hover=(key == self.hover), ph=e["ph"], detail=e["R"] > 95, main=main)
 
     def _set(self, item, **kw):
         """Only touches the canvas when something actually changed (saves CPU)."""
@@ -1519,7 +1526,7 @@ class JarvisUI:
             txt = DISPLAY[k] + ("  [CONTAINED]" if k == "ultron" and e["contain"] > 0.5 else "")
             col = _hexcol(mix(e["col"], (255, 255, 255), 0.35 if k == self.hover else 0.0))
             self._set(it, state="normal", text=txt, fill=col)
-            c.coords(it, HUD_X0 + e["x"], HUD_Y0 + e["y"] + e["R"] * 1.3 + 8)
+            c.coords(it, HUD_X0 + e["x"], HUD_Y0 + e["y"] + e["R"] * (1.0 + DEPTH_SCALE * e["z"]) * 1.3 + 8)
         col = _hexcol(self.ent[self.active]["col"])
         if sleeping:
             label = 'SLEEPING  -  say "wake up"'
@@ -1688,7 +1695,7 @@ class JarvisUI:
 
     def _draw_orb(self, t, dt, st, lvl):
         e = dict(self.ent[self.active])
-        e.update(x=self.ORB / 2, y=self.ORB / 2, R=self.ORB * 0.44, contain=0.0)
+        e.update(x=self.ORB / 2, y=self.ORB / 2, R=self.ORB * 0.44, contain=0.0, z=0.0)
         ent = self._main_entity(self.active, e, st, lvl, True)
         ent["detail"] = False
         img = self.orb_c.render([ent], t, dt, self.g, self.shock, False)

@@ -18,12 +18,13 @@ import time
 
 NEW_BLOCK = r'''# ================= PHONE (Android over USB: answer, decline and make calls) =================
 PHONE_PIN_UNLOCK = globals().get("PHONE_PIN_UNLOCK", True)      # True = "unlock my phone" may use the saved PIN
-PHONE_PIN_CONFIRM = globals().get("PHONE_PIN_CONFIRM", True)    # True = Jarvis asks "Unlock with the saved PIN?" first
+PHONE_PIN_CONFIRM = globals().get("PHONE_PIN_CONFIRM", True)    # True = Windows Hello must verify before using the saved PIN
 _PHONE_AGENT_WANTS = "2026-11-07-contacts"
 try:
     import phone_screen_agent
 except ImportError:
     phone_screen_agent = None
+import windows_hello
 phone = None
 _phone_ctx = {"ringing": False, "who": "", "handled": False}
 
@@ -35,6 +36,16 @@ def _phone_speak(text):
     finally:
         if got:
             busy.release()
+
+
+def _phone_pin_confirmation(prompt):
+    hwnd = windows_hello.find_window("E.C.H.O")
+    verified, detail = windows_hello.verify(
+        hwnd, prompt, cancelled=_agent["cancel"].is_set)
+    if not verified and "canceled" not in detail.lower():
+        ui.log_line("sys", "Windows Hello: " + detail)
+        speak("Windows Hello could not verify you. " + detail)
+    return verified
 
 
 def _phone_connected(name):
@@ -182,9 +193,9 @@ def handle_phone(c):
         if _agent_busy():
             return True
         use_pin = PHONE_PIN_UNLOCK and arg != "fingerprint"
-        ask = _yes if PHONE_PIN_CONFIRM else (lambda m: True)
+        ask = _phone_pin_confirmation if PHONE_PIN_CONFIRM else (lambda m: True)
 
-        def work():                                  # fingerprint: waits for YOU; PIN: asks first. "stop" cancels
+        def work():                                  # fingerprint: waits for YOU; PIN: Windows Hello first. "stop" cancels
             speak(phone.unlock_auto(say=speak, cancel=_agent["cancel"], confirm=ask, use_pin=use_pin))
         _run_agent("phone unlock", work)
         return True

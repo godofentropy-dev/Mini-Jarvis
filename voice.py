@@ -11,6 +11,7 @@ from face_recognition_agent import FaceRecognitionAgent
 from file_agent import FileAgent
 from system_volume import SystemVolume, parse_volume_command
 from self_healing_agent import SelfHealingAgent
+from plugin_manager import PluginManager
 from messaging_agent import SocialAgent
 social_agent = SocialAgent()
 import jobs
@@ -4845,12 +4846,17 @@ def handle_open_apps(c):
 
     plan, missing = [], []
     for p in parts:
-        if p in SITES:
-            plan.append((p, "site", SITES[p]))
-            continue
         found = resolve_app(p)
         if found:
             plan.append(found)
+            continue
+        if verb != "start" and phone is not None and phone.connected:
+            phone_app = phone.find_app(p)
+            if phone_app is not None:
+                plan.append((p, "phone", phone_app))
+                continue
+        if p in SITES:
+            plan.append((p, "site", SITES[p]))
         else:
             missing.append(p)
     if verb == "start" and missing:                          # "start ..." is only an app if it really is one
@@ -4866,6 +4872,9 @@ def handle_open_apps(c):
         try:
             if kind == "site":
                 open_url(value)
+            elif kind == "phone":
+                if phone is None or not phone.connected or not phone.launch_app(value):
+                    raise RuntimeError("Phone app could not be launched")
             else:
                 launch(kind, value)
             names.append(display)
@@ -6077,7 +6086,7 @@ def _route_impl(command):
         return
     if c and handle_notify_settings(c):                      # "turn off notifications", "send notifications to my phone", "test notification"
         return
-    if c and (handle_agent_cancel(c) or handle_phone(c) or handle_phone_task(c) or handle_macro(c) or handle_screen_task(c)   # "stop", "answer the call", "watch me", "on my screen, ..."
+    if c and (handle_agent_cancel(c) or handle_app_workflow(c) or handle_phone_workflow(c) or handle_plugin(c) or handle_phone(c) or handle_phone_task(c) or handle_macro(c) or handle_screen_task(c)   # "stop", "answer the call", "watch me", "on my screen, ..."
               or handle_code_run(c) or handle_goal(c)):                                # "write a script and run it", "goal: ..."
         return
     src = vision_request(c) if c else None
@@ -6309,12 +6318,13 @@ def _safe(fn):
 
 # ================= PHONE (Android over USB: answer, decline and make calls) =================
 PHONE_PIN_UNLOCK = globals().get("PHONE_PIN_UNLOCK", True)      # True = "unlock my phone" may use the saved PIN
-PHONE_PIN_CONFIRM = globals().get("PHONE_PIN_CONFIRM", True)    # True = Jarvis asks "Unlock with the saved PIN?" first
+PHONE_PIN_CONFIRM = globals().get("PHONE_PIN_CONFIRM", True)    # True = Windows Hello must verify before using the saved PIN
 _PHONE_AGENT_WANTS = "2026-11-07-contacts"
 try:
     import phone_screen_agent
 except ImportError:
     phone_screen_agent = None
+import windows_hello
 phone = None
 _phone_ctx = {"ringing": False, "who": "", "handled": False}
 
@@ -6326,6 +6336,16 @@ def _phone_speak(text):
     finally:
         if got:
             busy.release()
+
+
+def _phone_pin_confirmation(prompt):
+    hwnd = windows_hello.find_window("E.C.H.O")
+    verified, detail = windows_hello.verify(
+        hwnd, prompt, cancelled=_agent["cancel"].is_set)
+    if not verified and "canceled" not in detail.lower():
+        ui.log_line("sys", "Windows Hello: " + detail)
+        speak("Windows Hello could not verify you. " + detail)
+    return verified
 
 
 def _phone_connected(name):
@@ -6430,6 +6450,225 @@ def handle_phone_task(c):
     return True
 
 
+# ================= PLUGINS (see plugin_manager.py) =================
+plugins = PluginManager(host={
+    "speak": speak,
+    "confirm": lambda q: _yes(q),
+    "get_phone": lambda: phone,
+    "cancel": _agent["cancel"],
+    "unlock_phone": lambda: phone.unlock_auto(
+        say=speak, cancel=_agent["cancel"], use_pin=PHONE_PIN_UNLOCK,
+        confirm=_phone_pin_confirmation if PHONE_PIN_CONFIRM else (lambda m: True)),
+})
+plugins.reload_all()
+
+
+def handle_plugin(c):
+    """Runs a plugin whose trigger matches. 'reload plugins' re-reads the plugins folder."""
+    if c in ("reload plugins", "reload my plugins"):
+        speak(plugins.reload_all())
+        return True
+    hit = plugins.match(c)
+    if not hit:
+        return False
+    plugin, m = hit
+    if _agent_busy():
+        return True
+    # Runs on THIS thread like most handlers, not through _run_agent: a plugin can ask a spoken yes/no
+    # (the PIN confirmation), and a background thread would compete with the main loop's follow-up
+    # listener, which would swallow your "yes" as a new chat message.
+    _agent["cancel"].clear()
+    out = plugins.run(plugin, c, m)
+    if out:
+        speak(out)
+    return True
+
+
+_APP_WORKFLOW_RE = re.compile(
+    r"^(?:please\s+)?(?:open|launch|start|use)\s+(?P<app>.+?)\s+(?:and|then|,)\s+(?P<task>.+)$", re.I)
+_APP_TASK_START = re.compile(
+    r"^(?:please\s+)?(?:then\s+)?(?:tell|ask|search|look|find|read|check|show|analy[sz]e|review|inspect|"
+    r"summar[yi]ze|write|create|send|message|email|call|dial|turn|switch|enable|disable|set|take|capture|"
+    r"open|launch|start|use|click|tap|type|enter|translate|play|pause|download|upload|share|post|publish|"
+    r"buy|purchase|delete|remove|install|calculate|solve|navigate|go|visit|browse|watch|listen|follow|"
+    r"subscribe|reply|comment|add|edit|update|schedule|book|order)\b", re.I)
+_MINI_JARVIS_GITHUB = "https://github.com/shreyasbalhey128-droid/Mini-Jarvis"
+_APP_WEB_URLS = dict(SITES, chatgpt="https://chatgpt.com")
+
+
+def _choose_workflow_device(command):
+    wants_phone = bool(re.search(r"\b(?:on|using|from)\s+(?:my\s+)?(?:phone|mobile)\b", command))
+    wants_laptop = bool(re.search(r"\b(?:on|using|from)\s+(?:my\s+)?(?:laptop|computer|pc)\b", command))
+    if wants_phone != wants_laptop:
+        return "phone" if wants_phone else "laptop"
+
+    speak("Should I use your phone or laptop?")
+    set_state("listening")
+    answer = confirm_input(15)
+    if answer:
+        text = answer[0].lower()
+        says_phone = bool(re.search(r"\b(?:phone|mobile)\b", text))
+        says_laptop = bool(re.search(r"\b(?:laptop|computer|pc)\b", text))
+        if says_phone != says_laptop:
+            return "phone" if says_phone else "laptop"
+    speak("I couldn't tell which device you chose. Please repeat the command and say phone or laptop.")
+    return None
+
+
+def handle_app_workflow(command):
+    """Open an app on the selected device and let its screen agent carry out a task."""
+    m = _APP_WORKFLOW_RE.match(command)
+    if not m or not _APP_TASK_START.match(m.group("task").strip()):
+        return False
+    if _agent_busy():
+        return True
+
+    app = re.sub(r"^(?:the|my)\s+", "", m.group("app").strip(), flags=re.I)
+    task = m.group("task").strip().rstrip(" ,")
+    device = _choose_workflow_device(command)
+    if device is None:
+        return True
+    if device == "phone":
+        if phone is None or not phone.connected:
+            speak("My phone isn't connected. Plug it in with USB debugging switched on.")
+            return True
+        if phone_screen_agent is None:
+            speak("Phone screen control isn't available right now.")
+            return True
+    elif screen_agent is None:
+        speak("Laptop screen control isn't available right now.")
+        return True
+
+    if re.search(r"\bmini[\s-]*jarvis\b", command, re.I) and re.search(r"\b(?:repo|repository)\b", command, re.I):
+        task += f" Use the public GitHub repository at {_MINI_JARVIS_GITHUB}."
+
+    _agent_models()
+    goal = (
+        f"Open {app}, then do this task: {task} "
+        "If the app requires login, verification, or entering a password, stop and tell me; do not enter credentials. "
+        "Ask for confirmation before any risky action, and report what you actually completed."
+    )
+
+    def work():
+        if device == "phone":
+            _agent["cancel"].clear()
+            confirm_pin = _phone_pin_confirmation if PHONE_PIN_CONFIRM else (lambda prompt: True)
+            unlocked = phone.unlock_auto(
+                say=speak, cancel=_agent["cancel"], confirm=confirm_pin, use_pin=PHONE_PIN_UNLOCK)
+            if unlocked not in ("Unlocked.", "Your phone is already unlocked."):
+                speak(unlocked)
+                return
+            opened = phone.open_target(app)
+            if not opened.startswith("Opened "):
+                url = _APP_WEB_URLS.get(app.lower())
+                if not url:
+                    speak(opened)
+                    return
+                opened = phone.open_target(url)
+                if not opened.startswith("Opened "):
+                    speak(opened)
+                    return
+            goal = (
+                f"In the open {app} app or page, do this task: {task} "
+                "If login, verification, or a password is required, stop and tell me; do not enter credentials. "
+                "Ask before risky actions and report what you actually completed."
+            )
+            result = phone_screen_agent.run_task(phone, goal, say=speak, confirm=_yes, cancel=_agent["cancel"])
+        else:
+            url = _APP_WEB_URLS.get(app.lower())
+            if url:
+                if not webbrowser.open(url):
+                    speak(f"I couldn't open {app} in your laptop browser.")
+                    return
+                time.sleep(2)
+                goal = (
+                    f"In the open {app} page, do this task: {task} "
+                    "If login, verification, or a password is required, stop and tell me; do not enter credentials. "
+                    "Ask before risky actions and report what you actually completed."
+                )
+            result = screen_agent.run_task(goal, say=speak, confirm=_yes)
+        speak(result)
+
+    _run_agent(f"{app} workflow on {device}", work)
+    return True
+
+
+_PHONE_WORKFLOW_CALL = re.compile(
+    r"\b(?:and\s+)?(?:then\s+)?(?:make\s+(?:a\s+)?)?call\s+(?:to\s+)?(?P<contact>[\w][\w .'-]*)\s*$")
+_PHONE_NOTIFICATION_APPS = (
+    ("instagram", "Instagram"), ("insta", "Instagram"), ("whatsapp", "WhatsApp"),
+    ("telegram", "Telegram"), ("gmail", "Gmail"),
+)
+
+
+def handle_phone_workflow(c):
+    """Runs an ordered unlock -> active-notifications -> confirmed-call phone workflow."""
+    call = _PHONE_WORKFLOW_CALL.search(c)
+    if not call:
+        return False
+    before_call = c[:call.start()]
+    unlock = re.search(r"\bunlock\b.*\bphone\b", before_call)
+    check = re.search(r"\b(?:read|check|show)\b.*\b(?:unread|messages?|notifications?)\b", before_call)
+    if not unlock or not check or unlock.start() > check.start():
+        return False
+
+    apps, seen = [], set()
+    for spoken, label in _PHONE_NOTIFICATION_APPS:
+        if re.search(rf"\b{re.escape(spoken)}\b", before_call) and label not in seen:
+            apps.append((spoken, label))
+            seen.add(label)
+    if not apps:
+        return False
+
+    if phone_agent is None or phone is None:
+        speak("Phone controls aren't available right now.")
+        return True
+    if _agent_busy():
+        return True
+    if not phone.connected:
+        speak("My phone isn't connected. Plug it in with USB debugging switched on.")
+        return True
+
+    notification_commands = [(app, f"read my {app} notifications") for app, _ in apps]
+    matched_plugins = [(command, plugins.match(command)) for _, command in notification_commands]
+    if any(not match for _, match in matched_plugins):
+        speak("I can't read those phone notifications right now. Check that the phone notifications plugin is enabled.")
+        return True
+
+    asks_about_unread_messages = bool(re.search(r"\b(?:unread|messages?)\b", before_call))
+    asks_for_notifications = bool(re.search(r"\bnotifications?\b", before_call))
+    if asks_about_unread_messages and not asks_for_notifications:
+        labels = " and ".join(label for _, label in apps)
+        if not _yes(
+            f"I can read currently active {labels} notifications, but not check unread messages inside those apps. "
+            "Should I continue with the notifications?"
+        ):
+            speak("Okay, I won't continue.")
+            return True
+
+    _agent["cancel"].clear()
+    confirm_pin = _phone_pin_confirmation if PHONE_PIN_CONFIRM else (lambda prompt: True)
+    unlocked = phone.unlock_auto(
+        say=speak, cancel=_agent["cancel"], confirm=confirm_pin, use_pin=PHONE_PIN_UNLOCK)
+    if unlocked not in ("Unlocked.", "Your phone is already unlocked."):
+        speak(unlocked)
+        return True
+    speak(unlocked)
+
+    for (app, command), (_, plugin_match) in zip(notification_commands, matched_plugins):
+        if _agent["cancel"].is_set():
+            speak("Okay, stopping the phone workflow.")
+            return True
+        plugin, match = plugin_match
+        result = plugins.run(plugin, command, match)
+        if result:
+            speak(result)
+
+    if not _agent["cancel"].is_set():
+        handle_phone("call " + call.group("contact").strip())
+    return True
+
+
 def handle_phone(c):
     """'answer the call', 'decline', 'hang up', 'call mom', 'call 98765 43210', 'put it on speaker', 'is my phone connected'."""
     if phone_agent is None or phone is None:
@@ -6473,10 +6712,9 @@ def handle_phone(c):
         if _agent_busy():
             return True
         use_pin = PHONE_PIN_UNLOCK and arg != "fingerprint"
-        ask = _yes if PHONE_PIN_CONFIRM else (lambda m: True)
-
-        def work():                                  # fingerprint: waits for YOU; PIN: asks first. "stop" cancels
-            speak(phone.unlock_auto(say=speak, cancel=_agent["cancel"], confirm=ask, use_pin=use_pin))
+        def work():                                  # fingerprint: waits for YOU; PIN: Windows Hello first. "stop" cancels
+            confirm = _phone_pin_confirmation if PHONE_PIN_CONFIRM else (lambda m: True)
+            speak(phone.unlock_auto(say=speak, cancel=_agent["cancel"], confirm=confirm, use_pin=use_pin))
         _run_agent("phone unlock", work)
         return True
     if action == "texts":

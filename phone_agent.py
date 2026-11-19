@@ -250,6 +250,18 @@ def _adb_text(text):
     return re.sub(r"([&|;<>()$`\\\"'*?#~!{}\[\]])", r"\\\1", text).replace(" ", "%s")
 
 
+_ADB_INPUT_ERROR = re.compile(
+    r"(?:permission denial|securityexception|not allowed|failed to inject|error:)", re.I)
+
+
+def _png_dimensions(image):
+    if len(image) < 24 or image[:8] != b"\x89PNG\r\n\x1a\n" or image[12:16] != b"IHDR":
+        return None
+    width = int.from_bytes(image[16:20], "big")
+    height = int.from_bytes(image[20:24], "big")
+    return (width, height) if width and height else None
+
+
 def parse_battery(out):
     """dumpsys battery -> (level, charging) or None"""
     m = re.search(r"level:\s*(\d+)", out)
@@ -613,7 +625,7 @@ class Phone:
                 return hits[0]
         return None
 
-    def _launch(self, spec):
+    def launch_app(self, spec):
         if isinstance(spec, tuple):
             rc, out = self._run("shell", "am", "start", "-a", spec[1])
             return self._ok(out)
@@ -627,10 +639,10 @@ class Phone:
             rc, out = self._run("shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url)
             return f"Opened {t} on your phone." if self._ok(out) else "I couldn't open that link."
         spec = self.find_app(t)
-        if spec is not None and self._launch(spec):
+        if spec is not None and self.launch_app(spec):
             return f"Opened {t} on your phone."
         alt = self._search_package(re.sub(r"^the\s+", "", t.lower()))          # the usual package isn't installed here
-        if alt and alt != spec and self._launch(alt):
+        if alt and alt != spec and self.launch_app(alt):
             return f"Opened {t} on your phone."
         return f"I couldn't find an app called {t} on your phone."
 
@@ -722,13 +734,12 @@ class Phone:
         """Wakes the phone, brings up the unlock prompt, then waits for you to unlock it with your fingerprint.
         Jarvis never touches your fingerprint, PIN or pattern. Returns a short spoken result."""
         self._run("shell", "input", "keyevent", "KEYCODE_WAKEUP")
-        time.sleep(0.8)
+        time.sleep(1.2)
         if not self.is_locked():
             return "Your phone is already unlocked."
-        _, size = self._run("shell", "wm size")
-        m = re.search(r"(\d+)x(\d+)", size)
-        w, h = (int(m.group(1)), int(m.group(2))) if m else (1080, 2400)
-        self._run("shell", f"input swipe {w // 2} {int(h * .85)} {w // 2} {int(h * .35)} 250")     # reveals the unlock prompt
+        if not self._swipe_to_unlock_prompt():
+            return ("I couldn't swipe to the phone's unlock prompt through ADB. Some phones require "
+                    "'USB debugging (Security settings)' in Developer options.")
         if say:
             say("Touch your fingerprint sensor to unlock the phone.")
         end = time.time() + timeout
@@ -740,19 +751,77 @@ class Phone:
                 return "Unlocked."
         return "It's still locked. Say unlock my phone when you're ready."
 
+    def _swipe_to_unlock_prompt(self):
+        rc, size = self._run("shell", "wm", "size")
+        sizes = re.findall(r"(\d+)x(\d+)", size)
+        if rc != 0 or not sizes:
+            return False
+        screen_w, screen_h = (int(v) for v in sizes[-1])
+
+        rc, density_out = self._run("shell", "wm", "density")
+        densities = re.findall(r"(?:Physical|Override)\s+density:\s*(\d+)", density_out)
+        if rc != 0 or not densities:
+            return False
+        density = int(densities[-1])
+
+        rc, screenshot = self._run("exec-out", "screencap", "-p", binary=True, timeout=25)
+        screenshot_size = _png_dimensions(screenshot) if rc == 0 else None
+        if screenshot_size is None:
+            return False
+        w, h = ((screen_h, screen_w) if screenshot_size == (screen_h, screen_w)
+                else (screen_w, screen_h))
+
+        prompt = None
+        ui_path = "/sdcard/jv_unlock_ui.xml"
+        try:
+            rc, _ = self._run("shell", "uiautomator", "dump", ui_path, timeout=20)
+            if rc == 0:
+                rc, xml = self._run("exec-out", "cat", ui_path, binary=True, timeout=10)
+                if rc == 0:
+                    prompt = next(
+                        (node for node in parse_ui_nodes(xml.decode("utf-8", "replace"))
+                         if re.search(r"\bswipe\b", node["label"])),
+                        None,
+                    )
+        finally:
+            self._run("shell", "rm", "-f", ui_path)
+
+        pixels_per_dp = density / 160
+        margin = max(1, round(8 * pixels_per_dp))
+        start_y = h - margin
+        travel = min(round(h * 0.65), round(420 * pixels_per_dp))
+        end_y = start_y - travel
+        x = w // 2
+        if prompt:
+            x1, y1, x2, y2 = prompt["bounds"]
+            x = max(0, min(w - 1, (x1 + x2) // 2))
+            prompt_y = (y1 + y2) // 2
+            end_y = min(end_y, prompt_y)
+
+        rc, out = self._run(
+            "shell", "input", "swipe", str(x), str(start_y),
+            str(x), str(max(0, end_y)), "250",
+        )
+        return rc == 0 and not _ADB_INPUT_ERROR.search(out)
+
     # ================= unlocking with the saved PIN (see phone_secret.py) =================
     def _shell_stdin(self, commands):
         """Runs shell commands on the phone through stdin, so a PIN never appears in a process's command line."""
         cmd = [self.adb] + (["-s", self.serial] if self.serial else []) + ["shell"]
+        script = []
+        for command in commands:
+            script.extend((command, 'if [ "$?" -ne 0 ]; then exit 1; fi'))
+        script.append("exit 0")
         try:
-            p = subprocess.run(cmd, input=("\n".join(commands) + "\nexit\n").encode("utf-8"),
+            p = subprocess.run(cmd, input=("\n".join(script) + "\n").encode("utf-8"),
                                capture_output=True, timeout=20, creationflags=NOWINDOW)
-            return p.returncode
-        except Exception:
-            return 1
+            out = p.stdout.decode("utf-8", "replace") + p.stderr.decode("utf-8", "replace")
+            return p.returncode, out
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return 1, str(e)
 
     def unlock_with_pin(self, say=None, cancel=None):
-        """Types the saved PIN once. Never retries (a few wrong tries lock the phone), and stops after two failures."""
+        """Types the saved PIN once; never retries a PIN that the phone may have rejected."""
         try:
             import phone_secret
             pin = phone_secret.load_pin()
@@ -764,18 +833,21 @@ class Phone:
             return ("I've failed to unlock it twice, so I'm stopping before your phone locks you out. "
                     "Check the saved PIN with phone pin setup, then restart me.")
         self._run("shell", "input", "keyevent", "KEYCODE_WAKEUP")
-        time.sleep(0.8)
+        time.sleep(1.2)
         if not self.is_locked():
             return "Your phone is already unlocked."
-        _, size = self._run("shell", "wm size")
-        m = re.search(r"(\d+)x(\d+)", size)
-        w, h = (int(m.group(1)), int(m.group(2))) if m else (1080, 2400)
-        self._run("shell", f"input swipe {w // 2} {int(h * .85)} {w // 2} {int(h * .35)} 250")     # reveals the PIN pad
-        time.sleep(1.0)
+        if not self._swipe_to_unlock_prompt():
+            return ("I couldn't swipe to the phone's PIN keypad through ADB. Some phones require "
+                    "'USB debugging (Security settings)' in Developer options.")
+        time.sleep(1.5)
         if cancel is not None and cancel.is_set():
             return "Okay, I'll leave it locked."
-        rc = self._shell_stdin([f"input text {_adb_text(pin)}", "input keyevent KEYCODE_ENTER"])
+        rc, out = self._shell_stdin([f"input text {_adb_text(pin)}", "input keyevent KEYCODE_ENTER"])
         pin = None
+        if rc != 0 or _ADB_INPUT_ERROR.search(out):
+            self._pin_failures += 1
+            return ("ADB couldn't send the saved PIN to the phone. Check the USB debugging permissions; "
+                    "some phones require 'USB debugging (Security settings)'. Jarvis won't retry automatically.")
         end = time.time() + 6
         while time.time() < end:
             time.sleep(0.8)
@@ -783,10 +855,12 @@ class Phone:
                 self._pin_failures = 0
                 return "Unlocked."
         self._pin_failures += 1
-        return "That didn't unlock it. I only try once, so it may be the saved PIN, or this phone blocks typed input on the lock screen."
+        return ("ADB sent the swipe and PIN input, but the phone stayed locked. Check the saved PIN. "
+                "If the keypad never appeared, enable 'USB debugging (Security settings)' in Developer options. "
+                "Jarvis won't retry automatically.")
 
     def unlock_auto(self, say=None, cancel=None, confirm=None, use_pin=True):
-        """Saved PIN if there is one (after a spoken yes), otherwise it waits for your fingerprint."""
+        """Saved PIN after confirmation if available; otherwise waits for your fingerprint."""
         try:
             import phone_secret
             has = use_pin and phone_secret.has_pin()

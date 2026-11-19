@@ -6,6 +6,11 @@ import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 # ---------------------------------------------------------------- layout constants
 S = 600                      # size of the big composite picture
+ORBIT_TILT = 0.80            # the orbit is seen at an angle: 1.0 = flat (as before), lower = more tilted
+DEPTH_SCALE = 0.22           # satellites on the near side of the orbit look this much bigger (far side smaller)
+DEPTH_DIM = 0.28             # ... and brighter (far side dimmer)
+GLASS = True                 # lit glass spheres under the reactors
+LENS = True                  # lens fringing, vignette and a little film grain (main window only)
 CX = CY = S / 2.0
 RING = 232.0                 # radius of the orbit the inactive reactors travel on
 R_BIG = 168.0                # radius of the active reactor
@@ -486,6 +491,33 @@ def draw_containment_rays(cv, ents, p, t=0.0):
     if p > CONTAIN_LOCK:                                                 # ...and an outgoing shockwave
         q = (p - CONTAIN_LOCK) / (1.0 - CONTAIN_LOCK)
         ring(d, ux, uy, R * (1.0 + 4.0 * q), ic(sc((255, 150, 90), (1.0 - q) * fade)), 2)
+# ---------------------------------------------------------------- lit glass spheres (one set of shading maps, resized per reactor)
+def make_sphere_maps(n=256):
+    """Grey-scale shading maps of a glass ball lit from the upper left: body (diffuse + inner glow), rim (fresnel +
+    bounce light from the lower right) and spec (the bright highlight). Tinted with the reactor's colours at draw time."""
+    c = (n - 1) / 2.0
+    yy, xx = np.mgrid[0:n, 0:n].astype(np.float32)
+    nx, ny = (xx - c) / c, (yy - c) / c
+    rho = np.hypot(nx, ny)
+    inside = np.clip((1.0 - rho) / 0.025, 0.0, 1.0)                     # soft, anti-aliased edge
+    nz = np.sqrt(np.clip(1.0 - rho ** 2, 0.0, 1.0))
+    light = np.array([-0.48, -0.58, 0.66], np.float32)
+    light /= np.linalg.norm(light)
+    ndl = np.clip(nx * light[0] + ny * light[1] + nz * light[2], 0.0, 1.0)
+    glow = np.exp(-(rho ** 2) * 5.0)                                    # light collected in the middle of the glass
+    body = np.clip(0.12 + 0.70 * ndl ** 1.25 + 0.55 * glow, 0.0, 1.0)
+    bounce = np.clip(0.55 * nx + 0.65 * ny, 0.0, 1.0)                   # cool light from the lower right
+    rim = np.clip((1.0 - nz) ** 2.6 * (0.55 + 0.9 * bounce), 0.0, 1.0)
+    half = light + np.array([0.0, 0.0, 1.0], np.float32)
+    half /= np.linalg.norm(half)
+    ndh = np.clip(nx * half[0] + ny * half[1] + nz * half[2], 0.0, 1.0)
+    spec = np.clip(ndh ** 90 * 1.4 + (ndh ** 14) * 0.16, 0.0, 1.0)
+    dx, dy = nx - 0.42, ny - 0.46                                        # a small reflected window light, opposite side
+    spec = np.clip(spec + np.exp(-(dx * dx + dy * dy) / 0.012) * 0.28, 0.0, 1.0)
+    to_img = lambda a: Image.fromarray((np.clip(a * inside, 0, 1) * 255).astype(np.uint8), "L")
+    return {"body": to_img(body), "rim": to_img(rim), "spec": to_img(spec)}
+
+
 # ---------------------------------------------------------------- physics: springs, embers, dust, ripples
 def spring_step(x, v, target, dt, k, z):
     """One step of a damped spring (substepped, so it stays stable at any frame rate).
@@ -558,11 +590,16 @@ class Fx:
     def primitives(self, main, col, sleeping):
         """What to draw: dots (x, y, radius, colour) and rings (x, y, radius, colour, width)."""
         dots, rings = [], []
+        edge = lambda x, y: max(0.0, min(1.0, min(x, S - x, y, S - y) / 45.0))   # fade out before the edge of the picture
         for p in self.parts:
             f = 1.0 - p[4] / p[5]                                             # fades out as it ages
-            dots.append((p[0], p[1], p[6] * (0.55 + 0.45 * f), ic(sc(mix(p[8], (255, 255, 255), 0.55 * f), f ** 1.0))))
+            fe = edge(p[0], p[1])
+            if fe > 0.02:
+                dots.append((p[0], p[1], p[6] * (0.55 + 0.45 * f), ic(sc(mix(p[8], (255, 255, 255), 0.55 * f), f * fe))))
         for m in self.motes:
-            dots.append((m[0], m[1], m[4], ic(sc(col, 0.10 if sleeping else 0.24 * m[4]))))
+            fe = edge(m[0], m[1])
+            if fe > 0.02:
+                dots.append((m[0], m[1], m[4], ic(sc(col, (0.10 if sleeping else 0.24 * m[4]) * fe))))
         cx, cy = (main["x"], main["y"]) if main else (CX, CY)
         for age, c in self.rings:
             f = age / 1.15
@@ -578,7 +615,19 @@ class Compositor:
         self.sprite = make_sprite()
         self.flare_h, self.flare_v = make_flare()
         self.rng = np.random.default_rng()
+        self.maps = make_sphere_maps()
+        self._glass_cache = {}
         self.base = self._make_base(size) if bg else Image.new("RGB", (size, size), (0, 0, 0))
+        self.lens = LENS and bg and key is None                         # no lens effects on a see-through floating orb
+        if self.lens:
+            n = size
+            yy, xx = np.mgrid[0:n, 0:n].astype(np.float32)
+            rr = np.hypot(xx - n / 2.0, yy - n / 2.0) / (n * 0.72)
+            vig = (np.clip(1.0 - 0.55 * rr ** 2.2, 0.35, 1.0) * 255).astype(np.uint8)
+            self.vig = Image.merge("RGB", (Image.fromarray(vig),) * 3)
+            self.grain = [Image.merge("RGB", (Image.fromarray(255 - self.rng.integers(0, 15, (n, n), dtype=np.uint8)),) * 3)
+                          for _ in range(4)]                          # film grain that only darkens a little (never lights the background)
+            self.gi = 0
     @staticmethod
     def _make_base(n):
         c = n / 2.0
@@ -591,9 +640,17 @@ class Compositor:
         img = Image.fromarray(arr.astype(np.uint8))
         dr = ImageDraw.Draw(img)
         k = n / S
-        ring(dr, c, c, RING * k, (22, 46, 68), 1)                       # the orbit the reactors travel on
+        T = ORBIT_TILT                                                    # the orbit the reactors travel on, seen at an angle
+        box = [c - RING * k, c - RING * k * T, c + RING * k, c + RING * k * T]
+        dr.ellipse(box, outline=(15, 33, 50))
+        dr.arc(box, 0, 180, fill=(34, 72, 104), width=1)                  # the near half is brighter
         for i in range(72):
-            seg(dr, c, c, (RING + 8) * k, (RING + (14 if i % 6 == 0 else 11)) * k, i * 5, (24, 52, 76))
+            a = math.radians(i * 5)
+            ca, sa = math.cos(a), math.sin(a)
+            r1, r2 = (RING + 8) * k, (RING + (14 if i % 6 == 0 else 11)) * k
+            near = 0.55 + 0.45 * max(0.0, sa)
+            dr.line([c + ca * r1, c + sa * r1 * T, c + ca * r2, c + sa * r2 * T],
+                    fill=tuple(int(v * near) for v in (28, 60, 88)), width=1)
         return img
     def bloom(self, layer):
         n = self.n
@@ -608,13 +665,72 @@ Image.BILINEAR).filter(ImageFilter.GaussianBlur(2.2)).resize((n, n), Image.BILIN
 Image.BILINEAR).filter(ImageFilter.GaussianBlur(1.6)).resize((n, n), Image.BILINEAR)
         glow = ImageChops.screen(ImageChops.add(q, q), ImageChops.add(w, w))
         return ImageChops.screen(self.base, ImageChops.screen(layer, ImageChops.screen(h, glow)))
+    def _glass_layer(self, d, col, acc, kb, kr, ks):
+        """The tinted shading of one glass ball. Cached: the colours and size hardly change from frame to frame."""
+        qc = lambda c: tuple(min(255, (int(v) // 8) * 8 + 4) for v in c)
+        col, acc = qc(col), qc(acc)
+        key = (d, col, acc, int(kb * 40), int(kr * 40), int(ks * 40))
+        layer = self._glass_cache.get(key)
+        if layer is None:
+            sz = (d, d)
+            body = ImageOps.colorize(self.maps["body"].resize(sz, Image.BILINEAR), (0, 0, 0), ic(sc(col, kb)))
+            rim = ImageOps.colorize(self.maps["rim"].resize(sz, Image.BILINEAR), (0, 0, 0), ic(sc(acc, kr)))
+            spec = ImageOps.colorize(self.maps["spec"].resize(sz, Image.BILINEAR), (0, 0, 0),
+                                     ic(sc((255, 255, 255), ks)))
+            layer = ImageChops.add(ImageChops.add(body, rim), spec)
+            if len(self._glass_cache) > 64:
+                self._glass_cache.pop(next(iter(self._glass_cache)))
+            self._glass_cache[key] = layer
+        return layer
+
+    def _sphere(self, img, e):
+        """The glass ball under a reactor: lit body, rim light and a specular highlight, tinted by its colours.
+        The big middle reactor gets a much subtler one (it is already bright), the small ones a stronger one."""
+        R = e["R"]
+        q = 4 if R > 60 else 2
+        d = int(R * 2.0) // q * q + 1
+        if d < 10:
+            return
+        k = 1.0 + (0.3 if e.get("hover") else 0.0)
+        lum = min(1.0, max(e["col"]) / 255.0) ** 0.6
+        if e.get("main"):
+            kb, kr, ks = 0.07 * (1.0 + 0.7 * e["lvl"]), 0.20, 0.20 * lum
+        else:
+            kb, kr, ks = 0.30 * k, 0.85 * k, 0.62 * lum
+        layer = self._glass_layer(d, e["col"], e["acc"], kb, kr, ks)
+        x0, y0 = int(e["x"] - d / 2), int(e["y"] - d / 2)
+        box = (x0, y0, x0 + d, y0 + d)
+        img.paste(ImageChops.add(img.crop(box), layer), box)
+
+    def _lens(self, out):
+        """A real lens is not perfect: colour fringes toward the edges, darker corners, a little grain."""
+        n, h = self.n, self.n // 2
+        r, g, b = out.split()
+        for ch, sx in ((r, 1), (b, -1)):                              # red drifts outwards, blue inwards (about 1 px at the edge)
+            for axis in (0, 1):
+                a, c = (ImageChops.offset(ch, -sx, 0) if axis == 0 else ImageChops.offset(ch, 0, -sx),
+                        ImageChops.offset(ch, sx, 0) if axis == 0 else ImageChops.offset(ch, 0, sx))
+                if axis == 0:
+                    ch.paste(a.crop((0, 0, h, n)), (0, 0))
+                    ch.paste(c.crop((h, 0, n, n)), (h, 0))
+                else:
+                    ch.paste(a.crop((0, 0, n, h)), (0, 0))
+                    ch.paste(c.crop((0, h, n, n)), (0, h))
+        out = ImageChops.multiply(Image.merge("RGB", (r, g, b)), self.vig)
+        self.gi += 1
+        if not self.gi % 2:                                           # grain at 12 Hz
+            out = ImageChops.multiply(out, self.grain[(self.gi // 2) % len(self.grain)])
+        return ImageChops.lighter(out, self.base)                      # the empty background stays exactly the window's colour: no visible square
+
     def render(self, ents, t, dt, g=0.0, shock=0.0, alert=False, containment=0.0, fx=None):
         img = Image.new("RGB", (self.n, self.n), (0, 0, 0))
         cv = Cv(img, self.sprite, self.flare_h, self.flare_v)
         main = None
-        for e in sorted(ents, key=lambda q: q["R"]):
+        for e in sorted(ents, key=lambda q: (q.get("z", 0.0), q["R"])):     # far side first, near side last
             if e["R"] < 6:
                 continue
+            if GLASS and self.key is None:                              # (not on the see-through floating orb)
+                self._sphere(img, e)
             tt = t + e["ph"]
             if e["key"] == "ultron":
                 draw_ultron(cv, e["x"], e["y"], e["R"], tt, e["st"], e["lvl"], e["col"], e["acc"],
@@ -650,6 +766,8 @@ e["detail"])
             draw_containment_rays(cv, ents, containment, t)
 
         out = self.bloom(img)
+        if self.lens:
+            out = self._lens(out)
         if g > 0.03 and self.rng.random() < 0.25 + 0.75 * g:
             out = glitch_image(out, g, self.rng)
         if self.key:                                                    # floating orb: transparent background

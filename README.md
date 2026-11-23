@@ -62,7 +62,7 @@
 ollama pull llama3.2:3b
 
 # 2. Clone the repo
-git clone https://github.com/shreyasbalhey128-droid/Mini-Jarvis.git
+git clone https://github.com/godofentropy-dev/Mini-Jarvis.git
 cd Mini-Jarvis
 
 # 3. Set up virtual environment

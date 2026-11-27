@@ -23,6 +23,7 @@ from phone_screen_agent import risk_reason as phone_risk_reason
 from voice_activation_agent import VoiceRecognitionAgent
 from jarvis_ui import claim_instance
 from plugin_manager import PluginManager
+import planner_agent
 
 
 class DocIndexTests(unittest.TestCase):
@@ -140,6 +141,16 @@ class DownloadSafetyTests(unittest.TestCase):
         with patch("download_agent.socket.getaddrinfo", return_value=[result]):
             with self.assertRaises(ValueError):
                 _validate_public_download_url("https://private.example/file.pdf")
+
+
+class PlannerCodeApprovalTests(unittest.TestCase):
+    def test_planner_hides_python_tool_without_approval(self):
+        self.assertNotIn('"run_python"', planner_agent._tool_list(allow_code=False))
+        self.assertIn('"run_python"', planner_agent._tool_list(allow_code=True))
+
+    def test_planner_python_tool_refuses_without_context_approval(self):
+        with self.assertRaisesRegex(RuntimeError, "not approved"):
+            planner_agent._run_python("print('no')", {"goal": "summarize a topic"})
 
 
 class PluginLoadSafetyTests(unittest.TestCase):

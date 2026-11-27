@@ -6229,6 +6229,9 @@ def handle_agent_cancel(c):
 
 _GOAL_RE = re.compile(r"^(?:goal\b|(?:please )?(?:research|find out about|look into)\b.*\b(?:and|then)\b.*"
                       r"\b(?:summari[sz]e|compare|write|create|make|save|list)\b)")
+_GOAL_CODE_RUN_RE = re.compile(
+    r"\\b(?:run|execute|test)\\b.{0,60}\\b(?:python|script|code)\\b|"
+    r"\\b(?:python|script|code)\\b.{0,60}\\b(?:run|execute|test)\\b", re.I)
 
 
 def handle_goal(c):
@@ -6238,11 +6241,20 @@ def handle_goal(c):
     if _agent_busy():
         return True
     _agent_models()
-    goal = re.sub(r"^goal[:,]?\s*", "", c)
+    goal = re.sub(r"^goal[:,]?\\s*", "", c)
+    allow_code = bool(_GOAL_CODE_RUN_RE.search(goal))
+    if allow_code:
+        with as_persona("karen", switch=False):
+            speak("This goal asks me to run generated Python code with Jarvis's Windows account permissions. "
+                  "It is not an isolated sandbox. Do you approve?")
+        answer = confirm_input(timeout=30)
+        if not answer or answer[0] not in YES_WORDS:
+            speak("Cancelled. I will not run generated code for this goal.")
+            return True
 
     def work():
         say = lambda t: _say_as("karen", t)
-        res = planner_agent.run_goal(goal, say=say)
+        res = planner_agent.run_goal(goal, say=say, allow_code=allow_code)
         say(res["answer"])
     _run_agent("goal", work)
     return True

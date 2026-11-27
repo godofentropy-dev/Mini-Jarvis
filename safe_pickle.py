@@ -51,3 +51,40 @@ def atomic_json_write(path, data):
                 os.remove(temporary)
             except OSError:
                 pass
+
+
+
+def atomic_text_write(path, content, encoding="utf-8"):
+    """Write text through a unique same-directory temporary file."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temporary = tempfile.mkstemp(prefix=".jarvis-text-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline="\\n") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+
+
+def atomic_bytes_write(path, content):
+    """Write bytes through a unique same-directory temporary file."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temporary = tempfile.mkstemp(prefix=".jarvis-bytes-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass

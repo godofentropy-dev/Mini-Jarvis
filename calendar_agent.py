@@ -349,14 +349,38 @@ def _iter_rule(start_wall, rule):
             m = (m - 1) % 12 + 1
     else:                                                    # YEARLY
         y = d0.year
-        months = sorted(bymo) if bymo else [d0.month]
         while empty < 1000:
-            got = []
-            for m in months:
-                got += [d for d in _month_dates(y, m, rule, d0) if d >= d0]
+            if byday and not bymo and any(ordn is not None for ordn, _ in byday):
+                weekdays = {weekday for _, weekday in byday}
+                year_days = [
+                    date(y, month, day)
+                    for month in range(1, 13)
+                    for day in range(1, _cal.monthrange(y, month)[1] + 1)
+                    if date(y, month, day).weekday() in weekdays
+                ]
+                selected = set()
+                for ordinal, weekday in byday:
+                    matches = [day for day in year_days if day.weekday() == weekday]
+                    if ordinal is None:
+                        selected.update(matches)
+                    else:
+                        index = ordinal - 1 if ordinal > 0 else ordinal
+                        if -len(matches) <= index < len(matches):
+                            selected.add(matches[index])
+                got = sorted(selected)
+                if bymd:
+                    got = [day for day in got
+                           if day.day in bymd or day.day - _cal.monthrange(y, day.month)[1] - 1 in bymd]
+            else:
+                months = sorted(bymo) if bymo else (range(1, 13) if bymd or byday else [d0.month])
+                month_rule = {key: value for key, value in rule.items() if key != "BYSETPOS"}
+                got = sorted({day for month in months for day in _month_dates(y, month, month_rule, d0)})
+            if pos and got:
+                got = _select_positions(got, pos)
+            got = [day for day in got if day >= d0]
             empty = 0 if got else empty + 1
-            for d in sorted(got):
-                yield make(d)
+            for day in got:
+                yield make(day)
             y += step
 
 

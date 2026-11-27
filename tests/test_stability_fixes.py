@@ -10,6 +10,7 @@ from jobs import DocIndex
 from self_healing_agent import SelfHealingAgent
 from code_executor import solve as solve_generated_code
 from download_agent import _validate_public_download_url
+from calendar_agent import _iter_rule
 from safe_pickle import atomic_bytes_write, atomic_json_write, atomic_text_write, load_numpy_pickle
 from screen_agent import risk_reason as screen_risk_reason
 from phone_screen_agent import risk_reason as phone_risk_reason
@@ -155,6 +156,23 @@ class DownloadSafetyTests(unittest.TestCase):
         with patch("download_agent.socket.getaddrinfo", return_value=[result]):
             with self.assertRaises(ValueError):
                 _validate_public_download_url("https://private.example/file.pdf")
+
+
+class CalendarYearlyRecurrenceTests(unittest.TestCase):
+    def test_yearly_by_monthday_without_bymonth_expands_all_months(self):
+        starts = list(_iter_rule(date(2025, 1, 1), {"FREQ": "YEARLY", "BYMONTHDAY": [1]}))
+        self.assertEqual(starts[:4], [date(2025, 1, 1), date(2025, 2, 1),
+                                      date(2025, 3, 1), date(2025, 4, 1)])
+
+    def test_yearly_byday_without_bymonth_expands_across_the_year(self):
+        starts = list(_iter_rule(date(2025, 1, 1), {"FREQ": "YEARLY", "BYDAY": [(None, 0)]}))
+        self.assertEqual(starts[:5], [date(2025, 1, 6), date(2025, 1, 13),
+                                      date(2025, 1, 20), date(2025, 1, 27),
+                                      date(2025, 2, 3)])
+
+    def test_last_weekday_of_year_uses_the_year_not_the_start_month(self):
+        starts = list(_iter_rule(date(2025, 1, 1), {"FREQ": "YEARLY", "BYDAY": [(-1, 0)]}))
+        self.assertEqual(starts[0], date(2025, 12, 29))
 
 
 class PlannerCodeApprovalTests(unittest.TestCase):

@@ -145,10 +145,10 @@ class PluginLoadSafetyTests(unittest.TestCase):
             marker = os.path.join(plugin_dir, "executed.txt")
             path = os.path.join(plugin_dir, "unsafe_plugin.py")
             source = (
-                "import re\\n"
-                f"open({marker!r}, 'w', encoding='utf-8').write('ran')\\n"
-                "META = {'name': 'unsafe', 'triggers': ['unsafe']}\\n"
-                "def run(ctx, command, match):\\n    return 'unsafe'\\n"
+                "import re\n"
+                f"open({marker!r}, 'w', encoding='utf-8').write('ran')\n"
+                "META = {'name': 'unsafe', 'triggers': ['unsafe']}\n"
+                "def run(ctx, command, match):\n    return 'unsafe'\n"
             )
             with open(path, "w", encoding="utf-8") as stream:
                 stream.write(source)

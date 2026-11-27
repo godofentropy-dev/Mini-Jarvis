@@ -745,6 +745,8 @@ def all_llm_models():
 
 
 _model_lock = threading.RLock()
+_model_io_lock = threading.RLock()       # serialize Ollama load/unload requests
+_model_swap_generation = 0               # stale persona switches must not win a race
 _ready = set()               # models that are loaded in Ollama right now (an answer from them does not have to wait for a load)
 _lru = []                    # the assistant models in RAM, most recently used first
 
@@ -767,52 +769,63 @@ def _forget_models():
 
 
 def _load_model(m, front=True):
-    """Loads a model into RAM and keeps it there. Blocks until it is ready."""
-    with _model_lock:
-        if m in _ready:
-            return
-    response = requests.post(
-        f"{URL}/api/generate",
-        json={"model": m, "keep_alive": MODEL_KEEP_ALIVE},
-        timeout=900,
-    )
-    response.raise_for_status()
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise RuntimeError("Ollama returned an invalid model-load response.") from exc
-    if isinstance(payload, dict) and payload.get("error"):
-        raise RuntimeError(str(payload["error"]))
-    _note_loaded(m, front)
+    """Loads a model in a serialized Ollama operation and waits for confirmation."""
+    with _model_io_lock:
+        with _model_lock:
+            if m in _ready:
+                return
+        response = requests.post(
+            f"{URL}/api/generate",
+            json={"model": m, "keep_alive": MODEL_KEEP_ALIVE},
+            timeout=900,
+        )
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Ollama returned an invalid model-load response.") from exc
+        if isinstance(payload, dict) and payload.get("error"):
+            raise RuntimeError(str(payload["error"]))
+        _note_loaded(m, front)
 
 
 def _swap_models(old_key, new_key):
-    """Different assistant, different model. Loading starts right now, in the background, while the hand-off line is still
-    being spoken. If more than MODELS_IN_RAM models are loaded, the one used least recently is dropped."""
+    """Serialize model changes and ignore stale switches when the user changes persona quickly."""
+    global _model_swap_generation
     if not PER_PERSONA_MODELS or S["asleep"]:
         return
     old_m, new_m = llm_model(old_key), llm_model(new_key)
     keep = {new_m, old_m} if MODELS_IN_RAM >= 2 else {new_m}
+    _model_swap_generation += 1
+    generation = _model_swap_generation
 
     def run():
         try:
-            drop = []
-            with _model_lock:
-                if new_m in _lru:
-                    _lru.remove(new_m)
-                _lru.insert(0, new_m)
-                for g in reversed(list(_lru)):
-                    if len(_lru) <= max(1, MODELS_IN_RAM):
-                        break
-                    if g not in keep:
-                        _lru.remove(g)
-                        _ready.discard(g)
-                        drop.append(g)
-            for g in drop:
-                requests.post(f"{URL}/api/generate", json={"model": g, "keep_alive": 0}, timeout=30)
-            _load_model(new_m)
-        except Exception:
-            pass
+            with _model_io_lock:
+                if generation != _model_swap_generation:
+                    return
+                drop = []
+                with _model_lock:
+                    if new_m in _lru:
+                        _lru.remove(new_m)
+                    _lru.insert(0, new_m)
+                    for model_name in reversed(list(_lru)):
+                        if len(_lru) <= max(1, MODELS_IN_RAM):
+                            break
+                        if model_name not in keep:
+                            _lru.remove(model_name)
+                            _ready.discard(model_name)
+                            drop.append(model_name)
+                for model_name in drop:
+                    response = requests.post(
+                        f"{URL}/api/generate",
+                        json={"model": model_name, "keep_alive": 0},
+                        timeout=30,
+                    )
+                    response.raise_for_status()
+                _load_model(new_m)
+        except Exception as exc:
+            ui.log_line("sys", f"Could not switch to {new_m}: {exc}")
     threading.Thread(target=run, daemon=True).start()
 
 
@@ -825,9 +838,14 @@ def _warm_second_model():
         return
     m = counts.most_common(1)[0][0]
 
+    generation = _model_swap_generation
+
     def run():
         try:
-            _load_model(m, front=False)
+            with _model_io_lock:
+                if generation != _model_swap_generation:
+                    return
+                _load_model(m, front=False)
         except Exception:
             pass
     threading.Thread(target=run, daemon=True).start()

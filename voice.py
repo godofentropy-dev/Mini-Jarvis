@@ -7122,7 +7122,12 @@ def jarvis_loop():
         threading.Thread(target=boot_ollama, daemon=True).start()     # checks Ollama while the models load
         # Keep typed commands available even if a speech model is missing or fails to initialize.
         threading.Thread(target=text_loop, daemon=True, name="jarvis-text").start()
-        init_models()
+        speech_ready = False
+        try:
+            init_models()
+            speech_ready = True
+        except Exception as init_error:
+            ui.log_line("sys", f"Speech initialization failed; typed commands remain available: {init_error}")
 
         # Restore conversation and UI mode if saved
         if saved:
@@ -7173,94 +7178,116 @@ def jarvis_loop():
         if PHONE_ENABLED and phone_agent is not None:
             start_phone()                                           # notices a phone on USB, announces calls
 
-        speak(f"{P()['name']} online and ready.")
+        if speech_ready:
+            speak(f"{P()['name']} online and ready.")
+        else:
+            ui.log_line("sys", "Jarvis started in typed-command mode; speech will retry automatically.")
 
+        loop_failures = 0
         while True:
+            try:
 
-            S["awake"] = False
-            set_state("sleep")
-            audio = ears.next_utterance()
-            if phone_ringing_active() and not S["asleep"] and _phone_ring_command(audio):
-                continue                                # phone ringing: "answer" / "decline" need no wake name
-            words = gate_words(audio)
-            key = next((PERSONA_WORDS[w] for w in words if w in PERSONA_WORDS), None)
-            if (key or "wake" in words) and not voice_ok(audio, "wake"):
-                continue                                # someone else said it: ignore completely
+                S["awake"] = False
+                set_state("sleep")
+                audio = ears.next_utterance()
+                loop_failures = 0
+                if phone_ringing_active() and not S["asleep"] and _phone_ring_command(audio):
+                    continue                                # phone ringing: "answer" / "decline" need no wake name
+                words = gate_words(audio)
+                key = next((PERSONA_WORDS[w] for w in words if w in PERSONA_WORDS), None)
+                if (key or "wake" in words) and not voice_ok(audio, "wake"):
+                    continue                                # someone else said it: ignore completely
 
-            from_sleep = False
-            if S["asleep"]:
-                if not key and "wake" not in words:
-                    continue                            # still asleep: ignore everything else
-                with busy:
-                    wake_up(announce=False)             # reload the speech models quietly
-                from_sleep = True
-            elif not key:
-                continue
-            if key:
-                if key != "ultron":
-                    _auto["home"] = key                   # you called an assistant by name: that is your pick now
-            else:
-                auto_return_check()                       # AUTO PERSONA: quiet for a while -> back to your assistant
-            key = key or cur_key
-            S["last"] = time.time()
-
-            summoned = False
-            if key != cur_key:
-                with busy:
-                    if key == "ultron":
-                        if not ultron_gate():           # double warning; "no" = back to standby
-                            continue
-                        switch_persona("ultron")
-                        summoned = True
-                    else:
-                        switch_persona(key, quiet=True)
-
-            S["awake"] = True
-            if not active["pinned"]:
-                active["conv"] = None                   # every wake-up starts a new conversation
-                push_convs()
-
-            command = ""
-            if not summoned:
-                set_state("thinking")
-                text = transcribe(audio)
-                print("Heard:", text)
-                woke, command = strip_wake(text, key)
-                if not woke:
-                    command = text
-                if command in WAKE_CMDS:
-                    command = ""
-                if not command:
+                from_sleep = False
+                if S["asleep"]:
+                    if not key and "wake" not in words:
+                        continue                            # still asleep: ignore everything else
                     with busy:
-                        speak(woke_line() if from_sleep else P().get("yes", "Yes?"))
+                        wake_up(announce=False)             # reload the speech models quietly
+                    from_sleep = True
+                elif not key:
+                    continue
+                if key:
+                    if key != "ultron":
+                        _auto["home"] = key                   # you called an assistant by name: that is your pick now
+                else:
+                    auto_return_check()                       # AUTO PERSONA: quiet for a while -> back to your assistant
+                key = key or cur_key
+                S["last"] = time.time()
 
-            while True:
-                if command:
-                    emit("you", command)
-                    if command in EXIT_WORDS:
+                summoned = False
+                if key != cur_key:
+                    with busy:
+                        if key == "ultron":
+                            if not ultron_gate():           # double warning; "no" = back to standby
+                                continue
+                            switch_persona("ultron")
+                            summoned = True
+                        else:
+                            switch_persona(key, quiet=True)
+
+                S["awake"] = True
+                if not active["pinned"]:
+                    active["conv"] = None                   # every wake-up starts a new conversation
+                    push_convs()
+
+                command = ""
+                if not summoned:
+                    set_state("thinking")
+                    text = transcribe(audio)
+                    print("Heard:", text)
+                    woke, command = strip_wake(text, key)
+                    if not woke:
+                        command = text
+                    if command in WAKE_CMDS:
+                        command = ""
+                    if not command:
                         with busy:
-                            speak(P().get("bye", "Goodbye."))
-                        ui.quit()
-                        return
-                    if command in NOOP_WORDS:
-                        break
-                    with busy:
-                        S["typed"] = False
-                        route(command)
-                    if S["asleep"]:                     # "go to sleep" ends the conversation
-                        break
-                set_state("listening")
-                print(f"Listening for follow-up ({FOLLOWUP_SECONDS}s)...")
-                nxt = listen_text(FOLLOWUP_SECONDS)
-                if S["asleep"] or nxt is None:
-                    break
-                _, command = strip_wake(nxt, cur_key)
-                print("You:", command)
+                            speak(woke_line() if from_sleep else P().get("yes", "Yes?"))
 
-            print("Going back to sleep." if S["asleep"] else "Going back to standby.")
-            active["pinned"] = False
-            if not S["asleep"]:
-                finalize_active()
+                while True:
+                    if command:
+                        emit("you", command)
+                        if command in EXIT_WORDS:
+                            with busy:
+                                speak(P().get("bye", "Goodbye."))
+                            ui.quit()
+                            return
+                        if command in NOOP_WORDS:
+                            break
+                        with busy:
+                            S["typed"] = False
+                            route(command)
+                        if S["asleep"]:                     # "go to sleep" ends the conversation
+                            break
+                    set_state("listening")
+                    print(f"Listening for follow-up ({FOLLOWUP_SECONDS}s)...")
+                    nxt = listen_text(FOLLOWUP_SECONDS)
+                    if S["asleep"] or nxt is None:
+                        break
+                    _, command = strip_wake(nxt, cur_key)
+                    print("You:", command)
+
+                print("Going back to sleep." if S["asleep"] else "Going back to standby.")
+                active["pinned"] = False
+                if not S["asleep"]:
+                    finalize_active()
+            except Exception as loop_error:
+                loop_failures += 1
+                delay = min(30, 2 ** min(loop_failures, 5))
+                S["awake"] = False
+                S["typed"] = False
+                S["raw_text"] = None
+                active["pinned"] = False
+                set_state("error")
+                ui.log_line("sys", f"Voice loop error; retrying in {delay}s: {loop_error}")
+                time.sleep(delay)
+                if loop_failures >= 3 and loop_failures % 3 == 0:
+                    try:
+                        init_models()
+                        loop_failures = 0
+                    except Exception as init_error:
+                        ui.log_line("sys", f"Speech reinitialization failed: {init_error}")
     except Exception as e:
         traceback.print_exc()
         set_state("error")

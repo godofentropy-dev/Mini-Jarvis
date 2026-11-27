@@ -2357,6 +2357,9 @@ def confirm_input(timeout=15):
                 return " ".join(re.sub(r"[^a-z0-9' ]", " ", raw.lower()).split()), False
         except queue.Empty:
             pass
+        if ears is None:
+            time.sleep(0.2)
+            continue
         audio = ears.next_utterance(0.2)
         if audio is not None:
             if not voice_ok(audio, "confirm"):       # a stranger cannot answer "yes" for you
@@ -6291,11 +6294,18 @@ def handle_code_run(c):
     if _agent_busy():
         return True
     model = _agent_models()
+    with as_persona("friday"):
+        speak("Nova can generate and execute a Python script with Jarvis's Windows account permissions. "
+              "It is not an isolated sandbox. Do you approve running generated code?")
+    answer = confirm_input(timeout=30)
+    if not answer or answer[0] not in YES_WORDS:
+        speak("Cancelled. I will not run the generated code.")
+        return True
 
     def work():
         say = lambda t: _say_as("friday", t)
         say("On it. I'll write it, run it, and fix any errors myself.")
-        res = code_executor.solve(c, model=model, say=say, cancel=_agent["cancel"])
+        res = code_executor.solve(c, model=model, say=say, cancel=_agent["cancel"], approved=True)
         if res.ok:
             out = res.stdout.strip() or "It ran without printing anything."
             out = out[:400] + (" ... and more." if len(out) > 400 else "")

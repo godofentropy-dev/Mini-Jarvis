@@ -99,8 +99,10 @@ def _run(code):
         return False, "", f"TimeoutError: script ran longer than {TIMEOUT_SECONDS}s and was stopped."
 
 
-def solve(task, max_attempts=MAX_ATTEMPTS, model=CODE_MODEL, say=None, cancel=None):
-    """Write -> run -> read stderr -> patch -> retry. Returns an ExecResult."""
+def solve(task, max_attempts=MAX_ATTEMPTS, model=CODE_MODEL, say=None, cancel=None, approved=False):
+    """Write -> run -> read stderr -> patch -> retry. Requires explicit approval before execution."""
+    if not approved:
+        return ExecResult(False, "", "", "Execution requires explicit user approval; no code was run.", 0)
     log = []
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -151,12 +153,15 @@ def wants_code(text):
     return bool(_TRIGGER.search(text))
 
 
-def handle(text, say=print, cancel=None):
+def handle(text, say=print, cancel=None, confirm=None):
     """Call from Nova's command handler. Returns the spoken summary, or None if not a code request."""
     if not wants_code(text):
         return None
+    if confirm is None or not confirm(
+            "Nova will execute generated code with this account's permissions. Do you approve?"):
+        return "I did not run the code because execution was not approved."
     say("On it. Writing and testing the script.")
-    res = solve(text, say=say, cancel=cancel)
+    res = solve(text, say=say, cancel=cancel, approved=True)
     if res.ok:
         out = res.stdout.strip() or "It ran without printing anything."
         if len(out) > 400:

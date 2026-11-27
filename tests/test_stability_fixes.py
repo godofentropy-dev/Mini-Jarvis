@@ -7,6 +7,7 @@ import numpy as np
 
 from jobs import DocIndex
 from self_healing_agent import SelfHealingAgent
+from code_executor import solve as solve_generated_code
 from screen_agent import risk_reason as screen_risk_reason
 from phone_screen_agent import risk_reason as phone_risk_reason
 from voice_activation_agent import VoiceRecognitionAgent
@@ -54,6 +55,15 @@ class DocIndexTests(unittest.TestCase):
 
         self.assertEqual(loaded.items, [])
         self.assertEqual(loaded.vecs.shape, (0, 1))
+
+
+class CodeExecutionSafetyTests(unittest.TestCase):
+    def test_execution_is_refused_without_explicit_approval(self):
+        result = solve_generated_code("print('hello')")
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.attempts, 0)
+        self.assertIn("no code was run", result.stderr)
 
 
 class VoiceLockTests(unittest.TestCase):

@@ -177,6 +177,14 @@ class CalendarYearlyRecurrenceTests(unittest.TestCase):
         self.assertEqual(starts[0], date(2025, 12, 29))
 
 
+    def test_yearly_bysetpos_selects_from_the_whole_year(self):
+        starts = list(islice(_iter_rule(
+            date(2025, 1, 1),
+            {"FREQ": "YEARLY", "BYMONTHDAY": [1], "BYSETPOS": [1, -1]},
+        ), 2))
+        self.assertEqual(starts, [date(2025, 1, 1), date(2025, 12, 1)])
+
+
 class PlannerCodeApprovalTests(unittest.TestCase):
     def test_planner_hides_python_tool_without_approval(self):
         self.assertNotIn('"run_python"', planner_agent._tool_list(allow_code=False))

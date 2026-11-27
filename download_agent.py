@@ -160,7 +160,11 @@ def download_pdf_from_url(url: str, folder: Path = PDF_DIR) -> Path:
                 raise RuntimeError("The download site returned an invalid redirect.")
             current_url = urljoin(current_url, location)
             continue
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.RequestException:
+            response.close()
+            raise
         break
     else:
         raise RuntimeError("The download link redirected too many times.")

@@ -6230,8 +6230,8 @@ def handle_agent_cancel(c):
 _GOAL_RE = re.compile(r"^(?:goal\b|(?:please )?(?:research|find out about|look into)\b.*\b(?:and|then)\b.*"
                       r"\b(?:summari[sz]e|compare|write|create|make|save|list)\b)")
 _GOAL_CODE_RUN_RE = re.compile(
-    r"\\b(?:run|execute|test)\\b.{0,60}\\b(?:python|script|code)\\b|"
-    r"\\b(?:python|script|code)\\b.{0,60}\\b(?:run|execute|test)\\b", re.I)
+    r"\b(?:run|execute|test)\b.{0,60}\b(?:python|script|code)\b|"
+    r"\b(?:python|script|code)\b.{0,60}\b(?:run|execute|test)\b", re.I)
 
 
 def handle_goal(c):
@@ -6241,7 +6241,7 @@ def handle_goal(c):
     if _agent_busy():
         return True
     _agent_models()
-    goal = re.sub(r"^goal[:,]?\\s*", "", c)
+    goal = re.sub(r"^goal[:,]?\s*", "", c)
     allow_code = bool(_GOAL_CODE_RUN_RE.search(goal))
     if allow_code:
         with as_persona("karen", switch=False):

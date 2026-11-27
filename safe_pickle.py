@@ -59,7 +59,7 @@ def atomic_text_write(path, content, encoding="utf-8"):
     directory = os.path.dirname(os.path.abspath(path))
     fd, temporary = tempfile.mkstemp(prefix=".jarvis-text-", suffix=".tmp", dir=directory)
     try:
-        with os.fdopen(fd, "w", encoding=encoding, newline="\\n") as stream:
+        with os.fdopen(fd, "w", encoding=encoding, newline="\n") as stream:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())

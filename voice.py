@@ -1193,13 +1193,13 @@ FILE_ACTION_VERBS = ("summarize ", "summarise ", "read ")
 
 
 def _resolve_file(name):
-    """A path from the last search results (matched by name) or an existing path; else None."""
-    name = name.strip().lower()
+    """Resolve a filename despite punctuation being removed during command routing."""
+    name = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
     if name:
-        for p in S.get("last_file_matches") or []:
-            base = os.path.basename(p).lower()
-            if name in (base, os.path.splitext(base)[0]) or name in base:
-                return p
+        for path in S.get("last_file_matches") or []:
+            base = re.sub(r"[^a-z0-9]+", " ", os.path.basename(path).lower()).strip()
+            if name == base or name in base:
+                return path
     return name if name and os.path.isfile(name) else None
 
 

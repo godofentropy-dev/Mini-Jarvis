@@ -5,6 +5,14 @@ import unittest
 
 import numpy as np
 
+
+class UnsafePicklePayload:
+    def __init__(self, marker):
+        self.marker = marker
+
+    def __reduce__(self):
+        return exec, (f"open({self.marker!r}, 'w', encoding='utf-8').write('ran')",)
+
 from jobs import DocIndex
 from self_healing_agent import SelfHealingAgent
 from code_executor import solve as solve_generated_code
@@ -108,17 +116,14 @@ class SafePickleTests(unittest.TestCase):
     def test_untrusted_global_is_rejected(self):
         import pickle
 
-        class UnsafeGlobal:
-            def __reduce__(self):
-                return (os.system, ("this-command-must-never-run",))
-
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "untrusted.pkl")
             with open(path, "wb") as stream:
-                pickle.dump(UnsafeGlobal(), stream)
+                pickle.dump(UnsafePicklePayload(os.path.join(directory, "executed.txt")), stream)
 
             with self.assertRaises(pickle.UnpicklingError):
                 load_numpy_pickle(path, max_bytes=100_000)
+            self.assertFalse(os.path.exists(os.path.join(directory, "executed.txt")))
 
 
 class DownloadSafetyTests(unittest.TestCase):

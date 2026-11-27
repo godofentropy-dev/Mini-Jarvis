@@ -6,13 +6,6 @@ import unittest
 import numpy as np
 
 
-class UnsafePicklePayload:
-    def __init__(self, marker):
-        self.marker = marker
-
-    def __reduce__(self):
-        return exec, (f"open({self.marker!r}, 'w', encoding='utf-8').write('ran')",)
-
 from jobs import DocIndex
 from self_healing_agent import SelfHealingAgent
 from code_executor import solve as solve_generated_code
@@ -24,6 +17,15 @@ from voice_activation_agent import VoiceRecognitionAgent
 from jarvis_ui import claim_instance
 from plugin_manager import PluginManager
 import planner_agent
+
+
+class UnsafePicklePayload:
+    def __init__(self, marker):
+        self.marker = marker
+
+    def __reduce__(self):
+        return exec, (f"open({self.marker!r}, 'w', encoding='utf-8').write('ran')",)
+
 
 
 class DocIndexTests(unittest.TestCase):

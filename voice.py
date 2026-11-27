@@ -7318,7 +7318,8 @@ def jarvis_loop():
                 time.sleep(delay)
                 if loop_failures >= 3 and loop_failures % 3 == 0:
                     try:
-                        init_models()
+                        with busy:
+                            init_models()
                         loop_failures = 0
                     except Exception as init_error:
                         ui.log_line("sys", f"Speech reinitialization failed: {init_error}")

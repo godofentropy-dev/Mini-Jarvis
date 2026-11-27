@@ -167,9 +167,15 @@ Mini-Jarvis/
 
 ---
 
+## 🔐 Execution boundaries
+
+- Generated Python scripts require explicit approval, but they still run with the current Windows account's permissions. The scratch folder and timeout are guardrails, **not** an operating-system sandbox.
+- Plugins are checked for import-time executable statements before loading, but plugin functions still run inside Jarvis. Only use plugin code you have reviewed.
+- Screen and phone automation ask for confirmation before detected risky actions and before continuing after text entry. Review each action before approving it.
+
 ## ⚠️ Disclaimer
 
-> This is a **personal project**. WhatsApp/Instagram features use browser automation on your own accounts — use at your own risk as platforms may restrict automated access. Your voice profile, memories, and login sessions stay on your machine and are **not** part of this repo.
+> This is a **personal project**. WhatsApp/Instagram features use browser automation on your own accounts. Platforms may restrict automated access. Your voice profile, memories, and login sessions stay on your machine and are **not** part of this repo.
 
 ---
 

@@ -8,6 +8,7 @@ import numpy as np
 from jobs import DocIndex
 from self_healing_agent import SelfHealingAgent
 from code_executor import solve as solve_generated_code
+from download_agent import _validate_public_download_url
 from screen_agent import risk_reason as screen_risk_reason
 from phone_screen_agent import risk_reason as phone_risk_reason
 from voice_activation_agent import VoiceRecognitionAgent
@@ -75,6 +76,22 @@ class DocIndexTests(unittest.TestCase):
 
         self.assertEqual(loaded.items, [])
         self.assertEqual(loaded.vecs.shape, (0, 1))
+
+
+class DownloadSafetyTests(unittest.TestCase):
+    def test_local_and_private_pdf_urls_are_rejected(self):
+        for url in ("http://localhost/file.pdf", "http://127.0.0.1/file.pdf",
+                    "http://192.168.1.10/file.pdf", "http://10.0.0.1/file.pdf"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                _validate_public_download_url(url)
+
+    def test_domain_resolving_to_private_address_is_rejected(self):
+        from unittest.mock import patch
+
+        result = (None, None, None, None, ("10.0.0.8", 0))
+        with patch("download_agent.socket.getaddrinfo", return_value=[result]):
+            with self.assertRaises(ValueError):
+                _validate_public_download_url("https://private.example/file.pdf")
 
 
 class PluginLoadSafetyTests(unittest.TestCase):

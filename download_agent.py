@@ -15,11 +15,15 @@ Typed example (links only survive when typed):
     "download this pdf https://example.com/file.pdf"
 """
 
+import ipaddress
 import os
 import re
 import shutil
+import socket
+import tempfile
 import threading
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -108,29 +112,67 @@ def _default_confirm(prompt: str) -> bool:
 # ----------------------------------------------------------------------------
 # PDFs
 # ----------------------------------------------------------------------------
+def _validate_public_download_url(url: str) -> str:
+    """Reject local/private destinations, including destinations reached by redirects."""
+    parsed = urlparse(url)
+    if (parsed.scheme.lower() not in ("http", "https") or not parsed.hostname
+            or parsed.username or parsed.password):
+        raise ValueError("Please use a normal public HTTP or HTTPS PDF link.")
+
+    host = parsed.hostname.rstrip(".").lower()
+    if host == "localhost" or host.endswith((".localhost", ".local")):
+        raise ValueError("For safety, I can only download from public internet addresses.")
+
+    try:
+        addresses = {ipaddress.ip_address(host)}
+    except ValueError:
+        try:
+            addresses = {
+                ipaddress.ip_address(info[4][0])
+                for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            }
+        except OSError as exc:
+            raise RuntimeError("I couldn't resolve that download address.") from exc
+
+    if not addresses or any(not address.is_global for address in addresses):
+        raise ValueError("For safety, I can only download from public internet addresses.")
+    return url
+
+
 def download_pdf_from_url(url: str, folder: Path = PDF_DIR) -> Path:
-    """Download a PDF from a direct link. Raises RuntimeError on failure."""
+    """Download a public PDF through validated redirects and an atomic temporary file."""
     folder.mkdir(parents=True, exist_ok=True)
-
-    with requests.get(
-        url,
-        headers={"User-Agent": USER_AGENT},
-        stream=True,
-        timeout=REQUEST_TIMEOUT,
-        allow_redirects=True,
-    ) as response:
+    current_url = url
+    response = None
+    for _ in range(6):
+        _validate_public_download_url(current_url)
+        response = requests.get(
+            current_url,
+            headers={"User-Agent": USER_AGENT},
+            stream=True,
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=False,
+        )
+        if response.status_code in (301, 302, 303, 307, 308):
+            location = response.headers.get("Location")
+            response.close()
+            if not location:
+                raise RuntimeError("The download site returned an invalid redirect.")
+            current_url = urljoin(current_url, location)
+            continue
         response.raise_for_status()
+        break
+    else:
+        raise RuntimeError("The download link redirected too many times.")
 
+    with response:
         length = response.headers.get("Content-Length")
         if length and int(length) > MAX_PDF_BYTES:
             raise RuntimeError("That file is too big.")
 
-        # File name from the server header, else from the URL
-        filename = ""
         disposition = response.headers.get("Content-Disposition", "")
         match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', disposition)
-        if match:
-            filename = match.group(1)
+        filename = match.group(1) if match else ""
         if not filename:
             filename = os.path.basename(response.url.split("?")[0]) or "document.pdf"
         filename = _safe_name(filename)
@@ -138,25 +180,33 @@ def download_pdf_from_url(url: str, folder: Path = PDF_DIR) -> Path:
             filename += ".pdf"
 
         target = _unique_path(folder / filename)
-
-        total = 0
-        first_chunk = True
-        with open(target, "wb") as f:
-            for chunk in response.iter_content(chunk_size=64 * 1024):
-                if not chunk:
-                    continue
-                if first_chunk:
-                    first_chunk = False
-                    if not chunk.lstrip().startswith(b"%PDF"):
-                        f.close()
-                        target.unlink(missing_ok=True)
-                        raise RuntimeError("That link is not a real PDF.")
-                total += len(chunk)
-                if total > MAX_PDF_BYTES:
-                    f.close()
-                    target.unlink(missing_ok=True)
-                    raise RuntimeError("That file is too big.")
-                f.write(chunk)
+        fd, temporary = tempfile.mkstemp(prefix=".jarvis-pdf-", suffix=".part", dir=folder)
+        try:
+            total = 0
+            first_chunk = True
+            with os.fdopen(fd, "wb") as stream:
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    if first_chunk:
+                        first_chunk = False
+                        if not chunk.lstrip().startswith(b"%PDF"):
+                            raise RuntimeError("That link is not a real PDF.")
+                    total += len(chunk)
+                    if total > MAX_PDF_BYTES:
+                        raise RuntimeError("That file is too big.")
+                    stream.write(chunk)
+                if first_chunk or total == 0:
+                    raise RuntimeError("That link returned an empty file, not a PDF.")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
 
     return target
 

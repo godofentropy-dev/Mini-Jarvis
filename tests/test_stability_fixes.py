@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from datetime import date
+from itertools import islice
 
 import numpy as np
 
@@ -161,18 +162,18 @@ class DownloadSafetyTests(unittest.TestCase):
 
 class CalendarYearlyRecurrenceTests(unittest.TestCase):
     def test_yearly_by_monthday_without_bymonth_expands_all_months(self):
-        starts = list(_iter_rule(date(2025, 1, 1), {"FREQ": "YEARLY", "BYMONTHDAY": [1]}))
+        starts = list(islice(_iter_rule(date(2025, 1, 1), {"FREQ": "YEARLY", "BYMONTHDAY": [1]}), 4))
         self.assertEqual(starts[:4], [date(2025, 1, 1), date(2025, 2, 1),
                                       date(2025, 3, 1), date(2025, 4, 1)])
 
     def test_yearly_byday_without_bymonth_expands_across_the_year(self):
-        starts = list(_iter_rule(date(2025, 1, 1), {"FREQ": "YEARLY", "BYDAY": [(None, 0)]}))
+        starts = list(islice(_iter_rule(date(2025, 1, 1), {"FREQ": "YEARLY", "BYDAY": [(None, 0)]}), 5))
         self.assertEqual(starts[:5], [date(2025, 1, 6), date(2025, 1, 13),
                                       date(2025, 1, 20), date(2025, 1, 27),
                                       date(2025, 2, 3)])
 
     def test_last_weekday_of_year_uses_the_year_not_the_start_month(self):
-        starts = list(_iter_rule(date(2025, 1, 1), {"FREQ": "YEARLY", "BYDAY": [(-1, 0)]}))
+        starts = list(islice(_iter_rule(date(2025, 1, 1), {"FREQ": "YEARLY", "BYDAY": [(-1, 0)]}), 1))
         self.assertEqual(starts[0], date(2025, 12, 29))
 
 

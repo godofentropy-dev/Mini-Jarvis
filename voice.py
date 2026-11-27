@@ -1205,8 +1205,9 @@ def _resolve_file(name):
 
 # ---------- WhatsApp / Instagram voice commands (the browser work lives in messaging_agent.py) ----------
 _SEND_RE = re.compile(
-    r"^(?:send|text|message|whatsapp)\s+(?:a\s+)?(?:whatsapp\s+)?(?:message\s+|text\s+)?(?:to\s+)?"
-    r"(.+?)\s+(?:saying|that says|and say|say|that)\s+(.+)$")
+    r"^(?:please\\s+)?(?:send|text|message|whatsapp)\\s+(?:a\\s+)?(?:whatsapp\\s+)?"
+    r"(?:message\\s+|text\\s+)?(?:to\\s+)?(.+?)\\s+(?:saying|that says|and say|say|that)\\s+(.+)$",
+    re.I)
 _READ_RES = [
     re.compile(r"^(?:read|show|check)(?:\s+me)?(?:\s+my)?(?:\s+whatsapp)?(?:\s+(?:messages?|chats?|texts?))?"
                r"\s+(?:from|of|with)\s+(.+)$"),
@@ -1698,7 +1699,7 @@ def handle_social_command(c):
 
 def handle_social_send_command(c):
     """'send a message to mom saying I'll be late' -> reads it back and only sends after a yes."""
-    m = _SEND_RE.match(c.lower())
+    m = _SEND_RE.match(_original_command(c)) or _SEND_RE.match(c)
     if not m:
         return False
     contact, body = m.group(1).strip(), m.group(2).strip()
@@ -5470,6 +5471,18 @@ def clean_command(c):
     return " ".join(words)
 
 
+def _original_command(normalized):
+    """Return typed text with punctuation/case intact, minus the active wake word."""
+    raw = S.get("raw_text")
+    if not raw:
+        return normalized
+    for wake in PERSONAS.get(cur_key, {}).get("wake", ()):
+        raw, count = re.subn(rf"\\b{re.escape(wake)}\\b", " ", raw, count=1, flags=re.I)
+        if count:
+            break
+    return " ".join(raw.split()) or normalized
+
+
 def handle_action(c):
     if c in ("apply patch", "apply the patch", "apply fix", "yes apply patch", "apply code fix"):
         if healer.pending_patch:
@@ -6284,8 +6297,8 @@ def handle_agent_cancel(c):
     return True
 
 
-_GOAL_RE = re.compile(r"^(?:goal\b|(?:please )?(?:research|find out about|look into)\b.*\b(?:and|then)\b.*"
-                      r"\b(?:summari[sz]e|compare|write|create|make|save|list)\b)")
+_GOAL_RE = re.compile(r"^(?:goal\\b|(?:please )?(?:research|find out about|look into)\\b.*\\b(?:and|then)\\b.*"
+                      r"\\b(?:summari[sz]e|compare|write|create|make|save|list)\\b)", re.I)
 _GOAL_CODE_RUN_RE = re.compile(
     r"\b(?:run|execute|test)\b.{0,60}\b(?:python|script|code)\b|"
     r"\b(?:python|script|code)\b.{0,60}\b(?:run|execute|test)\b", re.I)
@@ -6298,7 +6311,8 @@ def handle_goal(c):
     if _agent_busy():
         return True
     _agent_models()
-    goal = re.sub(r"^goal[:,]?\s*", "", c)
+    source = _original_command(c)
+    goal = re.sub(r"^goal[:,]?\\s*", "", source, flags=re.I)
     allow_code = bool(_GOAL_CODE_RUN_RE.search(goal))
     if allow_code:
         with as_persona("karen", switch=False):
@@ -6371,7 +6385,8 @@ def handle_code_run(c):
     def work():
         say = lambda t: _say_as("friday", t)
         say("On it. I'll write it, run it, and fix any errors myself.")
-        res = code_executor.solve(c, model=model, say=say, cancel=_agent["cancel"], approved=True)
+        task = _original_command(c)
+        res = code_executor.solve(task, model=model, say=say, cancel=_agent["cancel"], approved=True)
         if res.ok:
             out = res.stdout.strip() or "It ran without printing anything."
             out = out[:400] + (" ... and more." if len(out) > 400 else "")
@@ -6558,14 +6573,16 @@ def _phone_ring_command(audio):
     return False
 
 
-_PHONE_TASK = re.compile(r"^(?:please\s+)?(?:on|with)\s+my\s+phone[,:]?\s*(?:and\s+)?(.+)$")
+_PHONE_TASK = re.compile(r"^(?:please\\s+)?(?:on|with)\\s+my\\s+phone[,:]?\\s*(?:and\\s+)?(.+)$", re.I)
 
 
 def handle_phone_task(c):
     """'on my phone, open the camera and take a photo' - looks at the phone's screen, then taps, types and swipes."""
     if phone_screen_agent is None or phone is None:
         return False
-    m = _PHONE_TASK.match(c)
+    m = _PHONE_TASK.match(_original_command(c))
+    if not m:
+        m = _PHONE_TASK.match(c)
     if not m:
         return False
     goal = m.group(1).strip()

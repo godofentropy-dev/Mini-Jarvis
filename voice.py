@@ -3287,7 +3287,7 @@ def handle_persona(text):
 
 def strip_wake(text, key=None):
     """Strip a wake word only at the start, so names mentioned later remain intact."""
-    greeting = r"(?:(?:hey|hi|hello|okay|ok|yo|please)\s+)?"
+    greeting = r"(?:(?:hey|hi|hello|okay|ok|yo|please)[,.:;!?-]?\s+)?"
     for persona_key in ([key] if key else list(PERSONAS)):
         for wake in PERSONAS[persona_key]["wake"]:
             pattern = rf"^\s*{greeting}{re.escape(wake)}(?=$|[\s,.:;!?-])[\s,.:;!?-]*"
@@ -5486,7 +5486,7 @@ def _original_command(normalized):
     raw = S.get("raw_text")
     if not raw:
         return normalized
-    greeting = r"(?:(?:hey|hi|hello|okay|ok|yo|please)\s+)?"
+    greeting = r"(?:(?:hey|hi|hello|okay|ok|yo|please)[,.:;!?-]?\s+)?"
     for wake in PERSONAS.get(cur_key, {}).get("wake", ()):
         pattern = rf"^\s*{greeting}{re.escape(wake)}(?=$|[\s,.:;!?-])[\s,.:;!?-]*"
         raw, count = re.subn(pattern, "", raw, count=1, flags=re.I)

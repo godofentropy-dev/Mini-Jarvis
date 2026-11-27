@@ -1766,11 +1766,8 @@ if not convs and _old_history:                       # migrate the old single-hi
 def save_convs():
     with conv_lock:
         data = {"convs": [c for c in convs if c["log"]]}
-        tmp = CONV_FILE + ".tmp"
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-            os.replace(tmp, CONV_FILE)
+            _atomic_json_save(CONV_FILE, data)
         except Exception:
             traceback.print_exc()
 

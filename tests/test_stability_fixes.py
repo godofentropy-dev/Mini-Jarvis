@@ -214,9 +214,14 @@ class ScreenActionSafetyTests(unittest.TestCase):
         reason = phone_risk_reason({"action": "key", "key": "enter"}, [], state)
         self.assertIn("submitting", reason)
 
+    def test_phone_tap_after_typing_requires_confirmation(self):
+        history = ['typed "hello"']
+        reason = phone_risk_reason({"action": "tap", "id": 3}, [], {}, history)
+        self.assertIn("confirming", reason)
+
     def test_enter_without_recent_text_is_not_flagged(self):
         self.assertIsNone(screen_risk_reason({"action": "press", "key": "enter"}, [], []))
-        self.assertIsNone(phone_risk_reason({"action": "key", "key": "enter"}, [], {}))
+        self.assertIsNone(phone_risk_reason({"action": "key", "key": "enter"}, [], {}, []))
 
 
 class SelfHealingPatchTests(unittest.TestCase):

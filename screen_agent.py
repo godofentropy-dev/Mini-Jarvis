@@ -171,9 +171,9 @@ def _find(elems, eid):
 
 def risk_reason(action, elems, history=None):
     a = action.get("action")
-    if (a == "press" and str(action.get("key", "")).lower() == "enter"
-            and history and history[-1].startswith("typed ")):
-        return "submitting the text you just entered"
+    if (history and history[-1].startswith("typed ")
+            and a in ("press", "hotkey", "click", "double_click")):
+        return "confirming the next screen action after entering text"
     if a in ("click", "double_click"):
         try:
             el = _find(elems, int(action.get("id")))

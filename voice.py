@@ -1206,7 +1206,7 @@ def _resolve_file(name):
 # ---------- WhatsApp / Instagram voice commands (the browser work lives in messaging_agent.py) ----------
 _SEND_RE = re.compile(
     r"^(?:please\s+)?(?:send|text|message|whatsapp)\s+(?:a\s+)?(?:whatsapp\s+)?"
-    r"(?:message\s+|text\s+)?(?:to\s+)?(.+?)\s+(?:saying|that says|and say|say|that)\s+(.+)$",
+    r"(?:message\s+|text\s+)?(?:to\s+)?(.+?)\s+(?:saying|that says|and say|say|that)[:,]?\s+(.+)$",
     re.I)
 _READ_RES = [
     re.compile(r"^(?:read|show|check)(?:\s+me)?(?:\s+my)?(?:\s+whatsapp)?(?:\s+(?:messages?|chats?|texts?))?"

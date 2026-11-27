@@ -21,9 +21,9 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pylint
-        # Install project dependencies for import checking
-        pip install -r requirements.txt || echo "Some deps failed, continuing..."
+        # Install only the dependencies needed by the unit tests and static checks.
+        # The full application stack (audio, vision, ChromaDB, etc.) is not needed in this CI job.
+        pip install pylint numpy==2.2.6 requests==2.34.2
 
     - name: Compile Python files
       run: python -m compileall -q .

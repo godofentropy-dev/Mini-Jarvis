@@ -1,4 +1,5 @@
 import os
+import pickle
 import numpy as np
 
 from safe_pickle import load_numpy_pickle

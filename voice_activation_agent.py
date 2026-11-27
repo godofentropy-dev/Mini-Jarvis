@@ -13,6 +13,7 @@ Jarvis starts as fast as before when no voice is registered.
 import importlib
 import importlib.util
 import os
+import pickle
 import threading
 
 from safe_pickle import load_numpy_pickle

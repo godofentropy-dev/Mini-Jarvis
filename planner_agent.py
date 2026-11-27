@@ -17,6 +17,8 @@ import re
 import threading
 import urllib.request
 
+from safe_pickle import atomic_text_write
+
 from llm_utils import chat, DEFAULT_MODEL
 
 PLAN_MODEL = DEFAULT_MODEL
@@ -92,8 +94,7 @@ def _write(text, ctx):
     os.makedirs(OUT_DIR, exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "-", ctx["goal"].lower()).strip("-")[:50] or "document"
     path = os.path.join(OUT_DIR, f"{slug}.md")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
+    atomic_text_write(path, text)
     ctx["file"] = path
     return f"Saved to {path}"
 

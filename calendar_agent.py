@@ -17,6 +17,8 @@ import json
 import os
 import re
 import threading
+
+from safe_pickle import atomic_json_write, atomic_text_write
 import time
 import traceback
 from datetime import date, datetime, time as dtime, timedelta, timezone
@@ -608,10 +610,7 @@ class CalendarAgent:
 
     def _save_state(self):
         try:
-            tmp = self.state_file + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.state, f)
-            os.replace(tmp, self.state_file)
+            atomic_json_write(self.state_file, self.state)
         except OSError:
             pass
 
@@ -684,10 +683,7 @@ class CalendarAgent:
             text = r.text
             if "BEGIN:VCALENDAR" not in text:
                 raise ValueError("that link did not return a calendar")
-            tmp = self.cache_file + ".tmp"
-            with open(tmp, "w", encoding="utf-8", newline="") as f:
-                f.write(text)
-            os.replace(tmp, self.cache_file)
+            atomic_text_write(self.cache_file, text)
             self._load(text)
             self.last_sync, self.last_error = time.time(), ""
             return True, "ok"

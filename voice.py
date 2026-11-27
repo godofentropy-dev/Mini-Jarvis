@@ -7217,6 +7217,8 @@ def jarvis_loop():
                     continue
                 audio = ears.next_utterance(timeout=2)
                 if audio is None:
+                    if S["mic_off"]:
+                        continue
                     stream = getattr(ears, "stream", None)
                     last_block = getattr(ears, "last_block_at", 0.0)
                     stream_active = bool(stream is not None and stream.active)

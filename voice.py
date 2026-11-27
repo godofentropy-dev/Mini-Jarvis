@@ -5487,7 +5487,8 @@ def _original_command(normalized):
         raw, count = re.subn(rf"\b{re.escape(wake)}\b", " ", raw, count=1, flags=re.I)
         if count:
             break
-    return " ".join(raw.split()) or normalized
+    raw = re.sub(r"^[\\s,.:;!?-]+", "", " ".join(raw.split()))
+    return raw or normalized
 
 
 def handle_action(c):

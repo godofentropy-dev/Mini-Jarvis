@@ -18,6 +18,8 @@ import json
 import os
 import re
 import threading
+
+from safe_pickle import atomic_json_write
 import time
 
 MACRO_DIR = os.path.join(os.path.expanduser("~"), ".jarvis_macros")
@@ -123,8 +125,7 @@ class Recorder:
         return self.events
 
     def save(self, name):
-        with open(_path(name), "w", encoding="utf-8") as f:
-            json.dump(self.events, f)
+        atomic_json_write(_path(name), self.events)
         return _slug(name)
 
 

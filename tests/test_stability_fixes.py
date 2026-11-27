@@ -46,6 +46,24 @@ class DocIndexTests(unittest.TestCase):
         self.assertEqual(loaded.items, legacy_items)
         np.testing.assert_allclose(loaded.vecs, [[1.0, 0.0]])
 
+    def test_add_rejects_dimension_mismatch_without_losing_existing_source(self):
+        index = DocIndex(self.base)
+        index.items = [{"src": "old.txt", "text": "keep me"}]
+        index.vecs = np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+        added = index.add("new.txt", ["new content"], [[0.1, 0.2, 0.3]])
+
+        self.assertEqual(added, 0)
+        self.assertEqual(index.items, [{"src": "old.txt", "text": "keep me"}])
+        np.testing.assert_allclose(index.vecs, [[1.0, 0.0]])
+
+    def test_search_rejects_wrong_vector_dimensions(self):
+        index = DocIndex(self.base)
+        index.items = [{"src": "old.txt", "text": "keep me"}]
+        index.vecs = np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+        self.assertEqual(index.search([1.0, 0.0, 0.0]), [])
+
     def test_mismatched_legacy_pair_starts_empty(self):
         with open(self.base + ".json", "w", encoding="utf-8") as stream:
             json.dump([{"src": "orphan.txt", "text": "no matching vector"}], stream)

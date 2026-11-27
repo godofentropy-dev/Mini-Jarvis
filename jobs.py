@@ -319,12 +319,21 @@ class DocIndex:
         self.vecs = self.vecs[keep] if keep else np.zeros((0, 1), dtype=np.float32)
 
     def add(self, src, chunks, vectors):
-        self.remove(src)
         vecs = np.asarray(vectors, dtype=np.float32)
-        if len(vecs) != len(chunks) or not len(chunks):
+        if (vecs.ndim != 2 or len(vecs) != len(chunks) or not len(chunks)
+                or not np.isfinite(vecs).all()):
             return 0
-        self.items += [{"src": src, "text": t} for t in chunks]
-        self.vecs = vecs if len(self.vecs) == 0 else np.vstack([self.vecs, vecs])
+
+        # Build the replacement first. A bad vector batch must not delete the old source.
+        keep = [i for i, item in enumerate(self.items) if item["src"] != src]
+        kept_items = [self.items[i] for i in keep]
+        kept_vecs = self.vecs[keep] if keep else np.zeros((0, vecs.shape[1]), dtype=np.float32)
+        if kept_vecs.ndim != 2 or kept_vecs.shape[1] != vecs.shape[1]:
+            return 0
+
+        new_items = kept_items + [{"src": src, "text": text} for text in chunks]
+        new_vecs = vecs if not len(kept_vecs) else np.vstack([kept_vecs, vecs])
+        self.items, self.vecs = new_items, new_vecs
         return len(chunks)
 
     def clear(self):
@@ -354,6 +363,8 @@ class DocIndex:
         if not len(self.items):
             return []
         q = np.asarray(qvec, dtype=np.float32)
+        if q.ndim != 1 or q.size != self.vecs.shape[1] or not np.isfinite(q).all():
+            return []
         sims = (self.vecs @ q) / (np.linalg.norm(self.vecs, axis=1) * (np.linalg.norm(q) + 1e-9) + 1e-9)
         best = np.argsort(-sims)[:k]
         return [(float(sims[i]), self.items[i]["src"], self.items[i]["text"]) for i in best]

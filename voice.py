@@ -7125,7 +7125,7 @@ def jarvis_loop():
         speech_ready = False
         try:
             init_models()
-            speech_ready = True
+            speech_ready = ears is not None
         except Exception as init_error:
             ui.log_line("sys", f"Speech initialization failed; typed commands remain available: {init_error}")
 
@@ -7190,6 +7190,8 @@ def jarvis_loop():
                 S["awake"] = False
                 set_state("sleep")
                 audio = ears.next_utterance()
+                if audio is None:
+                    continue
                 loop_failures = 0
                 if phone_ringing_active() and not S["asleep"] and _phone_ring_command(audio):
                     continue                                # phone ringing: "answer" / "decline" need no wake name

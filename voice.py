@@ -7220,7 +7220,8 @@ def jarvis_loop():
                     stream = getattr(ears, "stream", None)
                     last_block = getattr(ears, "last_block_at", 0.0)
                     stream_active = bool(stream is not None and stream.active)
-                    if not stream_active or time.monotonic() - last_block > 10:
+                    if ((not stream_active or time.monotonic() - last_block > 10)
+                            and not busy.locked() and not mic_lock.locked()):
                         raise RuntimeError("Microphone input stream stopped responding")
                     continue
                 loop_failures = 0

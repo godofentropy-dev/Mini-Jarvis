@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import time
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from html.parser import HTMLParser
@@ -274,13 +275,35 @@ class DocIndex:
 
     def __init__(self, base):
         self.json_path, self.npy_path = base + ".json", base + ".npy"
+        self.index_path = base + ".npz"
         self.items, self.vecs = [], np.zeros((0, 1), dtype=np.float32)
+
+        # Prefer the single-file snapshot, committed with one atomic replace.
+        if os.path.isfile(self.index_path):
+            try:
+                with np.load(self.index_path, allow_pickle=False) as data:
+                    items = json.loads(str(data["items"].item()))
+                    vecs = np.asarray(data["vecs"], dtype=np.float32)
+                if (not isinstance(items, list) or vecs.ndim != 2 or len(items) != len(vecs)
+                        or any(not isinstance(it, dict) or "src" not in it or "text" not in it
+                               for it in items)):
+                    raise ValueError("invalid document index snapshot")
+                self.items, self.vecs = items, vecs
+                return
+            except Exception:
+                # A damaged snapshot may still have a valid legacy pair to recover.
+                pass
+
+        # Backward compatibility with indexes created before the atomic format.
         try:
             with open(self.json_path, "r", encoding="utf-8") as f:
-                self.items = json.load(f)
-            self.vecs = np.load(self.npy_path)
-            if len(self.items) != len(self.vecs):
+                items = json.load(f)
+            vecs = np.asarray(np.load(self.npy_path, allow_pickle=False), dtype=np.float32)
+            if (not isinstance(items, list) or vecs.ndim != 2 or len(items) != len(vecs)
+                    or any(not isinstance(it, dict) or "src" not in it or "text" not in it
+                           for it in items)):
                 raise ValueError("index files do not match")
+            self.items, self.vecs = items, vecs
         except Exception:
             self.items, self.vecs = [], np.zeros((0, 1), dtype=np.float32)
 
@@ -308,9 +331,24 @@ class DocIndex:
         self.items, self.vecs = [], np.zeros((0, 1), dtype=np.float32)
 
     def save(self):
-        with open(self.json_path, "w", encoding="utf-8") as f:
-            json.dump(self.items, f)
-        np.save(self.npy_path, self.vecs)
+        directory = os.path.dirname(os.path.abspath(self.index_path))
+        fd, temporary = tempfile.mkstemp(prefix=".jarvis-doc-index-", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                np.savez_compressed(
+                    stream,
+                    items=np.asarray(json.dumps(self.items, ensure_ascii=False)),
+                    vecs=np.asarray(self.vecs, dtype=np.float32),
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.index_path)
+        finally:
+            if os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
 
     def search(self, qvec, k=3):
         if not len(self.items):

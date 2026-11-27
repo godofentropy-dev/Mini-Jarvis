@@ -424,7 +424,7 @@ try {
   $null = [Windows.Security.Credentials.UI.UserConsentVerificationResult, Windows.Security.Credentials.UI, ContentType = WindowsRuntime]
   $av = Await ([Windows.Security.Credentials.UI.UserConsentVerifier]::CheckAvailabilityAsync()) ([Windows.Security.Credentials.UI.UserConsentVerifierAvailability])
   if ("$av" -ne "Available") { Write-Output ("UNAVAILABLE:" + $av); exit 0 }
-  $res = Await ([Windows.Security.Credentials.UI.UserConsentVerifier]::RequestVerificationAsync($env:ECHO_HELLO_MSG)) ([Windows.Security.Credentials.UI.UserConsentVerificationResult])
+  $res = Await ([Windows.Security.Credentials.UI.UserConsentVerifier]::RequestVerificationAsync($env:JARVIS_HELLO_MSG)) ([Windows.Security.Credentials.UI.UserConsentVerificationResult])
   Write-Output ("RESULT:" + $res)
 } catch { Write-Output ("ERROR:" + $_.Exception.Message) }
 '''
@@ -771,7 +771,18 @@ def _load_model(m, front=True):
     with _model_lock:
         if m in _ready:
             return
-    requests.post(f"{URL}/api/generate", json={"model": m, "keep_alive": MODEL_KEEP_ALIVE}, timeout=900)
+    response = requests.post(
+        f"{URL}/api/generate",
+        json={"model": m, "keep_alive": MODEL_KEEP_ALIVE},
+        timeout=900,
+    )
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Ollama returned an invalid model-load response.") from exc
+    if isinstance(payload, dict) and payload.get("error"):
+        raise RuntimeError(str(payload["error"]))
     _note_loaded(m, front)
 
 
@@ -6888,6 +6899,7 @@ def text_loop():
                 traceback.print_exc()
                 ui.log_line("sys", f"Error: {e}")
             finally:
+                S["raw_text"] = None
                 S["typed"] = False
                 set_state("sleep" if (S["asleep"] or not S["awake"]) else "listening")
 
@@ -6906,7 +6918,12 @@ def boot_ollama():
     for i in range(40):                                # the server may still be starting: wait up to ~40 s
         try:
             r = requests.get(f"{URL}/api/tags", timeout=3)
-            names = [m.get("name", "") for m in r.json().get("models", [])]
+            r.raise_for_status()
+            payload = r.json()
+            if not isinstance(payload, dict) or payload.get("error"):
+                raise RuntimeError(str(payload.get("error", "Invalid Ollama tags response"))
+                                   if isinstance(payload, dict) else "Invalid Ollama tags response")
+            names = [m.get("name", "") for m in payload.get("models", []) if isinstance(m, dict)]
             break
         except Exception:
             ui.boot_status("ollama", "loading", f"Waiting for server... {i + 1}s")
@@ -6933,7 +6950,18 @@ def boot_ollama():
                                    f"Run: ollama pull {m}")
     ui.boot_status("model", "loading", "Model Loading")
     try:                                               # loads it into RAM now, so the first answer is quick
-        requests.post(f"{URL}/api/generate", json={"model": llm_model(), "keep_alive": MODEL_KEEP_ALIVE}, timeout=900)
+        response = requests.post(
+            f"{URL}/api/generate",
+            json={"model": llm_model(), "keep_alive": MODEL_KEEP_ALIVE},
+            timeout=900,
+        )
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Ollama returned an invalid model-load response.") from exc
+        if isinstance(payload, dict) and payload.get("error"):
+            raise RuntimeError(str(payload["error"]))
         _note_loaded(llm_model())
         ui.boot_status("model", "ok", f"{llm_model()} ready")
         if PER_PERSONA_MODELS and WARM_SECOND_MODEL and MODELS_IN_RAM >= 2:
@@ -7025,6 +7053,8 @@ def jarvis_loop():
         apply_persona_ui()               # tell the window who is really active (it starts out as Jarvis)
 
         threading.Thread(target=boot_ollama, daemon=True).start()     # checks Ollama while the models load
+        # Keep typed commands available even if a speech model is missing or fails to initialize.
+        threading.Thread(target=text_loop, daemon=True, name="jarvis-text").start()
         init_models()
 
         # Restore conversation and UI mode if saved
@@ -7039,7 +7069,7 @@ def jarvis_loop():
                 ui.set_sleep(True)
                 set_state("sleep")
 
-        for fn in (get_start_apps, get_theme, text_loop, mic_watchdog, auto_sleep_watchdog):
+        for fn in (get_start_apps, get_theme, mic_watchdog, auto_sleep_watchdog):
             threading.Thread(target=fn, daemon=True).start()
         start_message_alerts()
 

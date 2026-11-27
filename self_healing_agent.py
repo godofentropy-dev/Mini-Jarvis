@@ -3,6 +3,25 @@ import os
 import re
 import ast
 import requests
+import tempfile
+
+def _atomic_write_text(path, content):
+    """Write text beside the destination, then atomically replace it."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temporary = tempfile.mkstemp(prefix=".jarvis-patch-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+
 
 class SelfHealingAgent:
     def __init__(self, ollama_url="http://127.0.0.1:11434", model="llama3.2:3b"):
@@ -42,11 +61,16 @@ class SelfHealingAgent:
                 },
                 timeout=120
             )
+            r.raise_for_status()
             data = r.json()
+            if not isinstance(data, dict):
+                return False, "Ollama returned an invalid patch response."
             if "error" in data:
                 return False, str(data["error"])
 
             raw_reply = data.get("message", {}).get("content", "").strip()
+            if not raw_reply:
+                return False, "Ollama returned an empty patch."
 
             # Clean markdown code blocks reliably
             code_match = re.search(r"```(?:python)?\s*\n(.*?)```", raw_reply, re.DOTALL)
@@ -65,8 +89,7 @@ class SelfHealingAgent:
 
             # Save proposed patch to a temporary file for review
             patch_file = file_path + ".proposed_patch.py"
-            with open(patch_file, "w", encoding="utf-8") as f:
-                f.write(patched_code)
+            _atomic_write_text(patch_file, patched_code)
 
             return True, patch_file
 
@@ -81,14 +104,17 @@ class SelfHealingAgent:
         file_path, original_code, patched_code = self.pending_patch
 
         try:
-            # Backup original code before overwriting
-            backup_file = file_path + ".bak"
-            with open(backup_file, "w", encoding="utf-8") as f:
-                f.write(original_code)
+            # Refuse to overwrite edits made after this patch was staged.
+            with open(file_path, "r", encoding="utf-8") as f:
+                current_code = f.read()
+            if current_code != original_code:
+                return False, "The source file changed after the patch was staged. Generate a fresh patch."
 
-            # Write patched code
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(patched_code)
+            # Revalidate immediately before applying and preserve a complete backup.
+            ast.parse(patched_code)
+            backup_file = file_path + ".bak"
+            _atomic_write_text(backup_file, original_code)
+            _atomic_write_text(file_path, patched_code)
 
             # Clean up temp file
             patch_file = file_path + ".proposed_patch.py"

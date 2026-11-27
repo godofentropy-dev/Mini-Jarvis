@@ -47,7 +47,8 @@ class VoiceRecognitionAgent:
 
     @property
     def lock_active(self):
-        return self._lock_on and self.has_voice and self._avail
+        # If the user enabled the lock, missing dependencies/profile must not silently disable it.
+        return self._lock_on
 
     def set_lock(self, on):
         self._lock_on = bool(on)
@@ -128,16 +129,23 @@ class VoiceRecognitionAgent:
         return True, f"Voice print saved from {len(embs)} clips."
 
     def check(self, audio, sr=16000):
-        """Is this clip you? -> (accepted, score or None, note). Fails open: if anything goes wrong
-        the clip is accepted, so a glitch can never lock you out of your own assistant."""
-        if not self.lock_active:
+        """Is this clip you? -> (accepted, score or None, note).
+
+        Once the user enables the lock, unavailable models, inference errors and clips
+        too short to classify are rejected rather than silently accepted.
+        """
+        if not self._lock_on:
             return True, None, "lock off"
+        if not self._avail:
+            return False, None, "voice model unavailable; rejected"
+        if not self.has_voice:
+            return False, None, "voice profile unavailable; rejected"
         try:
             emb = self._embed(audio, sr)
         except Exception as e:
-            return True, None, f"check failed ({e}), allowed"
+            return False, None, f"check failed ({e}); rejected"
         if emb is None:
-            return True, None, "too short to judge"
+            return False, None, "too short to judge; rejected"
         score = float(np.dot(emb, self.known_features))
         ok = score >= self.threshold
         return ok, score, "your voice" if ok else "different voice"

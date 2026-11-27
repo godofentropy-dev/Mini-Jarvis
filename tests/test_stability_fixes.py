@@ -9,6 +9,7 @@ from jobs import DocIndex
 from self_healing_agent import SelfHealingAgent
 from screen_agent import risk_reason as screen_risk_reason
 from phone_screen_agent import risk_reason as phone_risk_reason
+from voice_activation_agent import VoiceRecognitionAgent
 
 
 class DocIndexTests(unittest.TestCase):
@@ -53,6 +54,20 @@ class DocIndexTests(unittest.TestCase):
 
         self.assertEqual(loaded.items, [])
         self.assertEqual(loaded.vecs.shape, (0, 1))
+
+
+class VoiceLockTests(unittest.TestCase):
+    def test_enabled_lock_rejects_when_model_is_unavailable(self):
+        agent = VoiceRecognitionAgent()
+        agent._lock_on = True
+        agent.known_features = np.ones(256, dtype=np.float32)
+        agent._avail = False
+
+        accepted, score, note = agent.check(np.zeros(16000, dtype=np.float32))
+
+        self.assertFalse(accepted)
+        self.assertIsNone(score)
+        self.assertIn("rejected", note)
 
 
 class ScreenActionSafetyTests(unittest.TestCase):

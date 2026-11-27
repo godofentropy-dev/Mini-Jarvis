@@ -1193,7 +1193,14 @@ FILE_ACTION_VERBS = ("summarize ", "summarise ", "read ")
 
 
 def _resolve_file(name):
-    """Resolve a filename despite punctuation being removed during command routing."""
+    """Resolve an exact typed path first, then match names from recent search results."""
+    raw = _original_command(name)
+    raw_path = re.sub(
+        r"^(?:please\\s+)?(?:read|open|summari[sz]e|analy[sz]e|close)\\s+"
+        r"(?:(?:the\\s+)?(?:file|document)\\s+)?",
+        "", raw, flags=re.I).strip().strip('"').strip("'")
+    if raw_path and os.path.isfile(raw_path):
+        return os.path.abspath(raw_path)
     name = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
     if name:
         for path in S.get("last_file_matches") or []:

@@ -7191,6 +7191,7 @@ def jarvis_loop():
                 set_state("sleep")
                 audio = ears.next_utterance()
                 if audio is None:
+                    time.sleep(0.1)
                     continue
                 loop_failures = 0
                 if phone_ringing_active() and not S["asleep"] and _phone_ring_command(audio):

@@ -1205,8 +1205,8 @@ def _resolve_file(name):
 
 # ---------- WhatsApp / Instagram voice commands (the browser work lives in messaging_agent.py) ----------
 _SEND_RE = re.compile(
-    r"^(?:please\\s+)?(?:send|text|message|whatsapp)\\s+(?:a\\s+)?(?:whatsapp\\s+)?"
-    r"(?:message\\s+|text\\s+)?(?:to\\s+)?(.+?)\\s+(?:saying|that says|and say|say|that)\\s+(.+)$",
+    r"^(?:please\s+)?(?:send|text|message|whatsapp)\s+(?:a\s+)?(?:whatsapp\s+)?"
+    r"(?:message\s+|text\s+)?(?:to\s+)?(.+?)\s+(?:saying|that says|and say|say|that)\s+(.+)$",
     re.I)
 _READ_RES = [
     re.compile(r"^(?:read|show|check)(?:\s+me)?(?:\s+my)?(?:\s+whatsapp)?(?:\s+(?:messages?|chats?|texts?))?"
@@ -5477,7 +5477,7 @@ def _original_command(normalized):
     if not raw:
         return normalized
     for wake in PERSONAS.get(cur_key, {}).get("wake", ()):
-        raw, count = re.subn(rf"\\b{re.escape(wake)}\\b", " ", raw, count=1, flags=re.I)
+        raw, count = re.subn(rf"\b{re.escape(wake)}\b", " ", raw, count=1, flags=re.I)
         if count:
             break
     return " ".join(raw.split()) or normalized
@@ -6297,8 +6297,8 @@ def handle_agent_cancel(c):
     return True
 
 
-_GOAL_RE = re.compile(r"^(?:goal\\b|(?:please )?(?:research|find out about|look into)\\b.*\\b(?:and|then)\\b.*"
-                      r"\\b(?:summari[sz]e|compare|write|create|make|save|list)\\b)", re.I)
+_GOAL_RE = re.compile(r"^(?:goal\b|(?:please )?(?:research|find out about|look into)\b.*\b(?:and|then)\b.*"
+                      r"\b(?:summari[sz]e|compare|write|create|make|save|list)\b)", re.I)
 _GOAL_CODE_RUN_RE = re.compile(
     r"\b(?:run|execute|test)\b.{0,60}\b(?:python|script|code)\b|"
     r"\b(?:python|script|code)\b.{0,60}\b(?:run|execute|test)\b", re.I)
@@ -6312,7 +6312,7 @@ def handle_goal(c):
         return True
     _agent_models()
     source = _original_command(c)
-    goal = re.sub(r"^goal[:,]?\\s*", "", source, flags=re.I)
+    goal = re.sub(r"^goal[:,]?\s*", "", source, flags=re.I)
     allow_code = bool(_GOAL_CODE_RUN_RE.search(goal))
     if allow_code:
         with as_persona("karen", switch=False):
@@ -6573,7 +6573,7 @@ def _phone_ring_command(audio):
     return False
 
 
-_PHONE_TASK = re.compile(r"^(?:please\\s+)?(?:on|with)\\s+my\\s+phone[,:]?\\s*(?:and\\s+)?(.+)$", re.I)
+_PHONE_TASK = re.compile(r"^(?:please\s+)?(?:on|with)\s+my\s+phone[,:]?\s*(?:and\s+)?(.+)$", re.I)
 
 
 def handle_phone_task(c):

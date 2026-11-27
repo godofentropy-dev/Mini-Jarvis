@@ -4,7 +4,7 @@ import queue
 import re
 import time
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -189,6 +189,10 @@ class SocialAgent:
             self._jobs.put((fut, fn, args, kw))
             try:
                 return fut.result(timeout=timeout)
+            except FutureTimeoutError:
+                # Prevent a timed-out queued action from running later without its caller knowing.
+                fut.cancel()
+                raise
             except _WorkerStopped:
                 time.sleep(0.4)
         raise RuntimeError("the messaging browser keeps stopping")

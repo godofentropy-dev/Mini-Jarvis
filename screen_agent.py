@@ -169,8 +169,11 @@ def _find(elems, eid):
     raise ValueError(f"no element {eid}")
 
 
-def risk_reason(action, elems):
+def risk_reason(action, elems, history=None):
     a = action.get("action")
+    if (history and history[-1].startswith("typed ")
+            and a in ("press", "hotkey", "click", "double_click")):
+        return "confirming the next screen action after entering text"
     if a in ("click", "double_click"):
         try:
             el = _find(elems, int(action.get("id")))
@@ -253,7 +256,7 @@ def run_task(goal, say=print, confirm=None, max_steps=MAX_STEPS):
             if action.get("action") == "done":
                 return action.get("answer") or "Done."
 
-            why = risk_reason(action, elems)
+            why = risk_reason(action, elems, history)
             if why:
                 ok = confirm(f"I'm about to do {why}. Should I go ahead?") if confirm else False
                 if not ok:

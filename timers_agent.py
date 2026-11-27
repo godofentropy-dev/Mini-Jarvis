@@ -21,6 +21,8 @@ voice.py gives it a function that actually speaks:  on_fire(item, late, ring_no)
 import datetime as dt
 import json
 import os
+
+from safe_pickle import atomic_json_write
 import re
 import threading
 import time
@@ -329,11 +331,8 @@ class TimerAgent:
 
     def _save(self):
         try:
-            tmp = self.path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.items, f)
-            os.replace(tmp, self.path)
-        except Exception:
+            atomic_json_write(self.path, self.items)
+        except OSError:
             pass
 
     def _add(self, kind, due, text="", name="", secs=0, routine=""):

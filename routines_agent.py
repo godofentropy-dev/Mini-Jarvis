@@ -39,6 +39,8 @@ This file reads/saves routines.json and understands what you said. voice.py does
 import copy
 import json
 import os
+
+from safe_pickle import atomic_json_write
 import re
 
 DEFAULTS = {
@@ -98,9 +100,8 @@ class Routines:
                 data = None
         else:
             try:
-                with open(self.path, "w", encoding="utf-8") as f:
-                    json.dump(DEFAULTS, f, indent=2)
-            except Exception:
+                atomic_json_write(self.path, DEFAULTS)
+            except OSError:
                 pass
         self.routines = {}
         for name, r in (data if data is not None else copy.deepcopy(DEFAULTS)).items():

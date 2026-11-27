@@ -23,6 +23,8 @@ HOTKEY_TEXT = "Ctrl+Alt+" + HOTKEY_CHAR
 MIC_HOTKEY_CHAR = "M"          # global shortcut: Ctrl + Alt + M  (mutes / unmutes the microphone)
 MIC_HOTKEY_TEXT = "Ctrl+Alt+" + MIC_HOTKEY_CHAR
 INSTANCE_PORT = 47653          # used so a second launch just wakes the first one
+INSTANCE_PING = b"JARVIS_SHOW_V1"
+INSTANCE_ACK = b"JARVIS_ACK_V1"
 
 MOOD_COLORS = True             # the active reactor's colour drifts with the time of day and how hard the computer works
                                # (say "mood colors off" to switch it off; the tint rules are in ui_effects.mood_for)
@@ -62,6 +64,17 @@ ROWS = (("CPU", "cpu"), ("RAM", "ram"), ("DSK", "disk"), ("BAT", "bat"))
 _instance_sock = None
 
 
+def _recv_exact(sock, size):
+    """Read a fixed-size local IPC message even when TCP splits it across packets."""
+    chunks = bytearray()
+    while len(chunks) < size:
+        chunk = sock.recv(size - len(chunks))
+        if not chunk:
+            break
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
 def claim_instance(on_show):
     """True if we are the only copy. Otherwise wakes the running copy and returns False."""
     global _instance_sock
@@ -69,13 +82,21 @@ def claim_instance(on_show):
     try:
         s.bind(("127.0.0.1", INSTANCE_PORT))
         s.listen(2)
-    except OSError:
+    except OSError as bind_error:
+        s.close()
         try:
-            c = socket.create_connection(("127.0.0.1", INSTANCE_PORT), timeout=1)
-            c.sendall(b"show")
-            c.close()
-        except OSError:
-            pass
+            with socket.create_connection(("127.0.0.1", INSTANCE_PORT), timeout=1) as c:
+                c.settimeout(1)
+                c.sendall(INSTANCE_PING)
+                response = _recv_exact(c, len(INSTANCE_ACK))
+        except OSError as connect_error:
+            raise RuntimeError(
+                f"Port {INSTANCE_PORT} is occupied, but no running Jarvis instance responded."
+            ) from connect_error
+        # An empty response is accepted only for compatibility with an older Jarvis
+        # instance, whose listener wakes the UI but does not send an acknowledgement.
+        if response not in (INSTANCE_ACK, b""):
+            raise RuntimeError(f"Port {INSTANCE_PORT} is being used by another application.") from bind_error
         return False
     _instance_sock = s
 
@@ -83,9 +104,15 @@ def claim_instance(on_show):
         while True:
             try:
                 conn, _ = s.accept()
-                conn.recv(16)
-                conn.close()
-                on_show()
+                conn.settimeout(1)
+                message = _recv_exact(conn, len(INSTANCE_PING))
+                if message in (INSTANCE_PING, b"show"):
+                    if message == INSTANCE_PING:
+                        conn.sendall(INSTANCE_ACK)
+                    conn.close()
+                    on_show()
+                else:
+                    conn.close()
             except Exception:
                 pass
 

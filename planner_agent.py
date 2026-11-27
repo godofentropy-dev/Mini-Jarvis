@@ -17,7 +17,10 @@ import re
 import threading
 import urllib.request
 
+from safe_pickle import atomic_text_write
+
 from llm_utils import chat, DEFAULT_MODEL
+from download_agent import _validate_public_download_url
 
 PLAN_MODEL = DEFAULT_MODEL
 OUT_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Jarvis")
@@ -46,10 +49,18 @@ def _strip_html(raw):
     return re.sub(r"\s+", " ", html.unescape(raw)).strip()
 
 
+class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_public_download_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _fetch(url, limit=1500):
+    _validate_public_download_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Jarvis)"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        raw = r.read(400_000).decode("utf-8", errors="replace")
+    opener = urllib.request.build_opener(_PublicRedirectHandler())
+    with opener.open(req, timeout=15) as response:
+        raw = response.read(400_000).decode("utf-8", errors="replace")
     return _strip_html(raw)[:limit]
 
 
@@ -92,27 +103,30 @@ def _write(text, ctx):
     os.makedirs(OUT_DIR, exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "-", ctx["goal"].lower()).strip("-")[:50] or "document"
     path = os.path.join(OUT_DIR, f"{slug}.md")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
+    atomic_text_write(path, text)
     ctx["file"] = path
     return f"Saved to {path}"
 
 
 @register_tool("run_python", "Write and run a Python script for a calculation or file job. Input: what the script should do.")
 def _run_python(task, ctx):
+    if not ctx.get("allow_code_execution", False):
+        raise RuntimeError("Generated code execution was not approved for this goal.")
     code_executor = importlib.import_module("code_executor")
-    res = code_executor.solve(task, cancel=cancel_event)
+    res = code_executor.solve(task, cancel=cancel_event, approved=True)
     if not res.ok:
         raise RuntimeError(res.stderr[-300:])
     return res.stdout.strip() or "(script ran, no output)"
 
 
 # ------------------------------------------------------------------ planning
-def _tool_list():
-    return "\n".join(f'- "{n}": {t["desc"]}' for n, t in TOOLS.items())
+def _tool_list(allow_code=False):
+    available = ((name, tool) for name, tool in TOOLS.items()
+                 if allow_code or name != "run_python")
+    return "\n".join(f'- "{name}": {tool["desc"]}' for name, tool in available)
 
 
-def make_plan(goal, tries=3):
+def make_plan(goal, tries=3, allow_code=False):
     system = (
         "You break a goal into a short plan of at most %d steps. Reply with JSON only:\n"
         '{"steps":[{"tool":"<tool name>","input":"<text>","why":"<few words>"}]}\n'
@@ -120,7 +134,7 @@ def make_plan(goal, tries=3):
         'Inside an input you may write {prev} for the previous step\'s result or {step1}, {step2}... '
         "for a specific earlier result. Use research to gather facts, ask_llm to summarize or "
         "compare, and write_document last if a document is wanted. Keep it minimal."
-    ) % (MAX_STEPS, _tool_list())
+    ) % (MAX_STEPS, _tool_list(allow_code=allow_code))
     for _ in range(tries):
         try:
             raw = chat([{"role": "system", "content": system},
@@ -154,15 +168,15 @@ def _repair_input(step, error):
     return chat([{"role": "user", "content": prompt}], model=PLAN_MODEL, temperature=0.3).strip()
 
 
-def run_goal(goal, say=print):
-    """Plan, execute, recover. Returns dict(ok, answer, file, steps)."""
+def run_goal(goal, say=print, allow_code=False):
+    """Plan, execute, recover. Generated Python is excluded unless explicitly approved."""
     cancel_event.clear()
     say("Let me plan that out.")
-    plan = make_plan(goal)
+    plan = make_plan(goal, allow_code=allow_code)
     if not plan:
         return {"ok": False, "answer": "I couldn't turn that into a plan.", "file": "", "steps": []}
 
-    ctx = {"goal": goal, "file": ""}
+    ctx = {"goal": goal, "file": "", "allow_code_execution": bool(allow_code)}
     results, log = [], []
     for i, step in enumerate(plan, 1):
         if cancel_event.is_set():

@@ -1,17 +1,17 @@
 # Mini-Jarvis 🦾
 
-> Your offline, voice-controlled AI assistant for Windows. No cloud. No subscriptions. Just Jarvis.
+> A local-first, voice-controlled AI assistant for Windows, powered by Ollama. No subscriptions.
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-lightgrey?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Offline](https://img.shields.io/badge/Cloud-None%20%E2%9C%93-brightgreen)](#-privacy-first)
+[![Local-first](https://img.shields.io/badge/AI-Local--first-brightgreen)](#-privacy-first)
 
 ---
 
 ## 📸 Screenshots
 
-![Mini-Jarvis UI](screenshot.png)
+![Mini-Jarvis UI](screenshots/ui.png)
 *The arc reactor interface with N.O.V.A. active — system stats, transcript, and voice controls.*
 
 ---
@@ -20,8 +20,8 @@
 
 | Category | Details |
 | --- | --- |
-| **🧠 AI Brain** | Runs fully offline on **Ollama** (llama3.2:3b) — zero cloud dependency |
-| **🔐 Voice Lock** | Responds **only to your voice** (Resemblyzer speaker verification) |
+| **🧠 AI Brain** | Local inference through **Ollama** (llama3.2:3b); optional web-connected features use the internet |
+| **🔐 Voice Lock** | Optional speaker verification for spoken commands; typed commands remain available |
 | **👥 6 AI Personas** | Each with unique voice, color, personality, and specialty |
 | **👁️ Vision** | Screen reading + camera input + drag-and-drop image analysis |
 | **💬 Messaging** | Reads/sends WhatsApp & Instagram via browser automation |
@@ -51,7 +51,7 @@
 ### Prerequisites
 
 - Windows 10/11
-- Python 3.10+
+- Python 3.10, 64-bit (the pinned Windows dlib wheel currently targets CPython 3.10)
 - [Ollama](https://ollama.com/) installed
 - Microphone
 
@@ -87,29 +87,38 @@ python voice.py
 
 **First launch:** Say *"register my voice"* to set up voice lock.
 
+### Optional feature dependencies
+
+Install only the extras for the features you plan to use:
+
+- Screen automation: `pyautogui`, `pywinauto`, `pynput`, `pyperclip`
+- Voice lock: `resemblyzer` and a compatible `torch` build
+- Silero voice activity detection: `silero-vad` and `torch`
+- System telemetry: `psutil`
+- Windows notifications: `winotify`
+- PDF search and song downloads: `ddgs`, `yt-dlp`, and FFmpeg
+- Android integration: Android Platform Tools (ADB) and USB debugging
+
+These are optional; the core app can start without many of them, but related features will be unavailable.
+
 ---
 
 ## 🗂️ Project Structure
 
-```javascript
+The current repository is intentionally flat rather than split into packages:
+
+```text
 Mini-Jarvis/
-├── voice.py              # Main entry point
-├── assistants/           # AI persona definitions
-├── core/                 # LLM, STT, TTS pipelines
-│   ├── ollama_client.py  # Local LLM interface
-│   ├── vosk_stt.py       # Offline speech-to-text
-│   └── piper_tts.py      # Offline text-to-speech
-├── agents/               # Functional modules
-│   ├── calendar_agent.py # Google Calendar (iCal)
-│   ├── vision_agent.py   # Screen + camera vision
-│   ├── messaging_agent.py# WhatsApp/Instagram
-│   └── system_agent.py   # App control, volume, etc.
-├── memory/               # Long-term memory (ChromaDB)
-├── ui/                   # Arc reactor interface
-│   ├── reactor.py        # Main animation
-│   └── orb_mode.py       # Floating orb
-├── security/             # Voice lock, face data
-└── data/                 # Runtime data (gitignored)
+├── voice.py                 # Main entry point and orchestration
+├── jarvis_ui.py             # Tkinter interface
+├── reactors.py, ui_effects.py
+├── llm_utils.py, jobs.py    # Local model helpers and job logic
+├── *_agent.py               # Feature agents (calendar, files, phone, vision, etc.)
+├── plugins/                 # Optional extensions
+├── tests/                   # Regression tests
+├── screenshots/             # Project screenshots
+├── requirements.txt
+└── .github/workflows/       # CI checks
 ```
 
 ---
@@ -118,12 +127,12 @@ Mini-Jarvis/
 
 | What | How |
 | --- | --- |
-| **Voice processing** | 100% local (Vosk + Piper) |
-| **AI inference** | Local via Ollama — no API calls |
-| **Voice prints** | Stored locally, never uploaded |
-| **Memories** | Local ChromaDB, consent-based |
-| **Browser sessions** | Isolated profile, stays on your machine |
-| **Cloud services** | Zero. Nada. Zilch. |
+| **Voice processing** | Vosk and Piper run locally after their models are installed |
+| **AI inference** | Ollama inference runs locally; no hosted LLM API is required |
+| **Voice prints** | Stored locally on the device |
+| **Memories** | Stored locally, with a consent prompt before saving personal facts |
+| **Browser sessions** | Playwright profile stays on the device |
+| **Internet use** | Web search, news, downloads, calendar feed refreshes, and messaging require network access |
 
 ---
 
@@ -158,9 +167,15 @@ Mini-Jarvis/
 
 ---
 
+## 🔐 Execution boundaries
+
+- Generated Python scripts require explicit approval, but they still run with the current Windows account's permissions. The scratch folder and timeout are guardrails, **not** an operating-system sandbox.
+- Plugins are checked for import-time executable statements before loading, but plugin functions still run inside Jarvis. Only use plugin code you have reviewed.
+- Screen and phone automation ask for confirmation before detected risky actions and before continuing after text entry. Review each action before approving it.
+
 ## ⚠️ Disclaimer
 
-> This is a **personal project**. WhatsApp/Instagram features use browser automation on your own accounts — use at your own risk as platforms may restrict automated access. Your voice profile, memories, and login sessions stay on your machine and are **not** part of this repo.
+> This is a **personal project**. WhatsApp/Instagram features use browser automation on your own accounts. Platforms may restrict automated access. Your voice profile, memories, and login sessions stay on your machine and are **not** part of this repo.
 
 ---
 
@@ -194,7 +209,7 @@ MIT License — see [LICENSE](LICENSE)
 
 **Shreyas**
 
-- GitHub: [@shreyasbalhey128-droid](https://github.com/shreyasbalhey128-droid)
+- GitHub: [@godofentropy-dev](https://github.com/godofentropy-dev)
 
 ---
 

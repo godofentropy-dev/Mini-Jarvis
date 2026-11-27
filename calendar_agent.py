@@ -17,6 +17,8 @@ import json
 import os
 import re
 import threading
+
+from safe_pickle import atomic_json_write, atomic_text_write
 import time
 import traceback
 from datetime import date, datetime, time as dtime, timedelta, timezone
@@ -266,6 +268,17 @@ def parse_ics(text):
 
 
 # ====================================================================== repeating events
+def _select_positions(items, positions):
+    """Select RFC-style positive/negative positions from an ordered recurrence period."""
+    size = len(items)
+    return sorted({
+        items[index]
+        for position in positions
+        for index in (position - 1 if position > 0 else position,)
+        if -size <= index < size
+    })
+
+
 def _month_dates(y, m, rule, d0):
     """The dates in one month that a MONTHLY / YEARLY rule selects."""
     n = _cal.monthrange(y, m)[1]
@@ -293,7 +306,7 @@ def _month_dates(y, m, rule, d0):
     out = [date(y, m, dd) for dd in sorted(days)]
     pos = rule.get("BYSETPOS")
     if pos and out:
-        out = sorted({out[p - 1 if p > 0 else p] for p in pos if -len(out) <= (p - 1 if p > 0 else p) < len(out)})
+        out = _select_positions(out, pos)
     return out
 
 
@@ -306,6 +319,7 @@ def _iter_rule(start_wall, rule):
     d0 = start_wall.date() if is_dt else start_wall
     freq, step = rule["FREQ"], max(1, rule.get("INTERVAL", 1))
     byday, bymd, bymo = rule.get("BYDAY"), rule.get("BYMONTHDAY"), rule.get("BYMONTH")
+    pos = rule.get("BYSETPOS")
 
     def make(d):
         return datetime.combine(d, t) if is_dt else d
@@ -347,14 +361,38 @@ def _iter_rule(start_wall, rule):
             m = (m - 1) % 12 + 1
     else:                                                    # YEARLY
         y = d0.year
-        months = sorted(bymo) if bymo else [d0.month]
         while empty < 1000:
-            got = []
-            for m in months:
-                got += [d for d in _month_dates(y, m, rule, d0) if d >= d0]
+            if byday and not bymo and any(ordn is not None for ordn, _ in byday):
+                weekdays = {weekday for _, weekday in byday}
+                year_days = [
+                    date(y, month, day)
+                    for month in range(1, 13)
+                    for day in range(1, _cal.monthrange(y, month)[1] + 1)
+                    if date(y, month, day).weekday() in weekdays
+                ]
+                selected = set()
+                for ordinal, weekday in byday:
+                    matches = [day for day in year_days if day.weekday() == weekday]
+                    if ordinal is None:
+                        selected.update(matches)
+                    else:
+                        index = ordinal - 1 if ordinal > 0 else ordinal
+                        if -len(matches) <= index < len(matches):
+                            selected.add(matches[index])
+                got = sorted(selected)
+                if bymd:
+                    got = [day for day in got
+                           if day.day in bymd or day.day - _cal.monthrange(y, day.month)[1] - 1 in bymd]
+            else:
+                months = sorted(bymo) if bymo else (range(1, 13) if bymd or byday else [d0.month])
+                month_rule = {key: value for key, value in rule.items() if key != "BYSETPOS"}
+                got = sorted({day for month in months for day in _month_dates(y, month, month_rule, d0)})
+            if pos and got:
+                got = _select_positions(got, pos)
+            got = [day for day in got if day >= d0]
             empty = 0 if got else empty + 1
-            for d in sorted(got):
-                yield make(d)
+            for day in got:
+                yield make(day)
             y += step
 
 
@@ -608,10 +646,7 @@ class CalendarAgent:
 
     def _save_state(self):
         try:
-            tmp = self.state_file + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.state, f)
-            os.replace(tmp, self.state_file)
+            atomic_json_write(self.state_file, self.state)
         except OSError:
             pass
 
@@ -684,10 +719,7 @@ class CalendarAgent:
             text = r.text
             if "BEGIN:VCALENDAR" not in text:
                 raise ValueError("that link did not return a calendar")
-            tmp = self.cache_file + ".tmp"
-            with open(tmp, "w", encoding="utf-8", newline="") as f:
-                f.write(text)
-            os.replace(tmp, self.cache_file)
+            atomic_text_write(self.cache_file, text)
             self._load(text)
             self.last_sync, self.last_error = time.time(), ""
             return True, "ok"

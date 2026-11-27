@@ -8,6 +8,8 @@ import os
 import sys
 from ctypes import wintypes
 
+from safe_pickle import atomic_bytes_write
+
 PATH = os.path.join(os.path.expanduser("~"), ".jarvis_phone_pin.bin")
 _ENTROPY = b"jarvis-phone-pin-v1"
 
@@ -46,8 +48,7 @@ def _unprotect(data):
 
 
 def save_pin(pin):
-    with open(PATH, "wb") as f:
-        f.write(_protect(pin.encode("utf-8")))
+    atomic_bytes_write(PATH, _protect(pin.encode("utf-8")))
 
 
 def load_pin():

@@ -1,4 +1,4 @@
-import ctypes, difflib, gc, importlib, json, os, queue, random, re, subprocess, sys, threading, time, traceback, uuid, wave, webbrowser, requests
+import ctypes, difflib, gc, importlib, json, os, queue, random, re, subprocess, sys, tempfile, threading, time, traceback, uuid, wave, webbrowser, requests
 from collections import deque
 from urllib.parse import quote_plus
 import numpy as np
@@ -424,7 +424,7 @@ try {
   $null = [Windows.Security.Credentials.UI.UserConsentVerificationResult, Windows.Security.Credentials.UI, ContentType = WindowsRuntime]
   $av = Await ([Windows.Security.Credentials.UI.UserConsentVerifier]::CheckAvailabilityAsync()) ([Windows.Security.Credentials.UI.UserConsentVerifierAvailability])
   if ("$av" -ne "Available") { Write-Output ("UNAVAILABLE:" + $av); exit 0 }
-  $res = Await ([Windows.Security.Credentials.UI.UserConsentVerifier]::RequestVerificationAsync($env:ECHO_HELLO_MSG)) ([Windows.Security.Credentials.UI.UserConsentVerificationResult])
+  $res = Await ([Windows.Security.Credentials.UI.UserConsentVerifier]::RequestVerificationAsync($env:JARVIS_HELLO_MSG)) ([Windows.Security.Credentials.UI.UserConsentVerificationResult])
   Write-Output ("RESULT:" + $res)
 } catch { Write-Output ("ERROR:" + $_.Exception.Message) }
 '''
@@ -745,6 +745,8 @@ def all_llm_models():
 
 
 _model_lock = threading.RLock()
+_model_io_lock = threading.RLock()       # serialize Ollama load/unload requests
+_model_swap_generation = 0               # stale persona switches must not win a race
 _ready = set()               # models that are loaded in Ollama right now (an answer from them does not have to wait for a load)
 _lru = []                    # the assistant models in RAM, most recently used first
 
@@ -767,41 +769,63 @@ def _forget_models():
 
 
 def _load_model(m, front=True):
-    """Loads a model into RAM and keeps it there. Blocks until it is ready."""
-    with _model_lock:
-        if m in _ready:
-            return
-    requests.post(f"{URL}/api/generate", json={"model": m, "keep_alive": MODEL_KEEP_ALIVE}, timeout=900)
-    _note_loaded(m, front)
+    """Loads a model in a serialized Ollama operation and waits for confirmation."""
+    with _model_io_lock:
+        with _model_lock:
+            if m in _ready:
+                return
+        response = requests.post(
+            f"{URL}/api/generate",
+            json={"model": m, "keep_alive": MODEL_KEEP_ALIVE},
+            timeout=900,
+        )
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Ollama returned an invalid model-load response.") from exc
+        if isinstance(payload, dict) and payload.get("error"):
+            raise RuntimeError(str(payload["error"]))
+        _note_loaded(m, front)
 
 
 def _swap_models(old_key, new_key):
-    """Different assistant, different model. Loading starts right now, in the background, while the hand-off line is still
-    being spoken. If more than MODELS_IN_RAM models are loaded, the one used least recently is dropped."""
+    """Serialize model changes and ignore stale switches when the user changes persona quickly."""
+    global _model_swap_generation
     if not PER_PERSONA_MODELS or S["asleep"]:
         return
     old_m, new_m = llm_model(old_key), llm_model(new_key)
     keep = {new_m, old_m} if MODELS_IN_RAM >= 2 else {new_m}
+    _model_swap_generation += 1
+    generation = _model_swap_generation
 
     def run():
         try:
-            drop = []
-            with _model_lock:
-                if new_m in _lru:
-                    _lru.remove(new_m)
-                _lru.insert(0, new_m)
-                for g in reversed(list(_lru)):
-                    if len(_lru) <= max(1, MODELS_IN_RAM):
-                        break
-                    if g not in keep:
-                        _lru.remove(g)
-                        _ready.discard(g)
-                        drop.append(g)
-            for g in drop:
-                requests.post(f"{URL}/api/generate", json={"model": g, "keep_alive": 0}, timeout=30)
-            _load_model(new_m)
-        except Exception:
-            pass
+            with _model_io_lock:
+                if generation != _model_swap_generation:
+                    return
+                drop = []
+                with _model_lock:
+                    if new_m in _lru:
+                        _lru.remove(new_m)
+                    _lru.insert(0, new_m)
+                    for model_name in reversed(list(_lru)):
+                        if len(_lru) <= max(1, MODELS_IN_RAM):
+                            break
+                        if model_name not in keep:
+                            _lru.remove(model_name)
+                            _ready.discard(model_name)
+                            drop.append(model_name)
+                for model_name in drop:
+                    response = requests.post(
+                        f"{URL}/api/generate",
+                        json={"model": model_name, "keep_alive": 0},
+                        timeout=30,
+                    )
+                    response.raise_for_status()
+                _load_model(new_m)
+        except Exception as exc:
+            ui.log_line("sys", f"Could not switch to {new_m}: {exc}")
     threading.Thread(target=run, daemon=True).start()
 
 
@@ -814,20 +838,42 @@ def _warm_second_model():
         return
     m = counts.most_common(1)[0][0]
 
+    generation = _model_swap_generation
+
     def run():
         try:
-            _load_model(m, front=False)
+            with _model_io_lock:
+                if generation != _model_swap_generation:
+                    return
+                _load_model(m, front=False)
         except Exception:
             pass
     threading.Thread(target=run, daemon=True).start()
 
 
+def _atomic_json_save(path, data, indent=None):
+    """Persist JSON through a same-directory temporary file and atomic replace."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temporary = tempfile.mkstemp(prefix=".jarvis-state-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(data, stream, indent=indent, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+
+
 def save_settings():
     try:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(SET, f)
+        _atomic_json_save(SETTINGS_FILE, SET)
     except Exception:
-        pass
+        traceback.print_exc()
 
 # ================= POP-UP NOTIFICATIONS (see notify_agent.py) =================
 # When you can't see or hear Jarvis (minimized, orb mode, hidden, asleep or the speaker is muted), anything that
@@ -866,8 +912,7 @@ def save_live_state():
             "asleep": S["asleep"],
             "timestamp": time.time()
         }
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
+        _atomic_json_save(STATE_FILE, state, indent=2)
     except Exception as e:
         print(f"Error saving live state: {e}")
 
@@ -944,8 +989,7 @@ if chromadb is not None:
 
 def save_profile():
     """Saves the user profile (name + any facts that could not go into the vector database)."""
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump({"profile": profile}, f, indent=2)
+    _atomic_json_save(MEMORY_FILE, {"profile": profile}, indent=2)
 
 
 def embed(text):
@@ -1149,20 +1193,28 @@ FILE_ACTION_VERBS = ("summarize ", "summarise ", "read ")
 
 
 def _resolve_file(name):
-    """A path from the last search results (matched by name) or an existing path; else None."""
-    name = name.strip().lower()
+    """Resolve an exact typed path first, then match names from recent search results."""
+    raw = _original_command(name)
+    raw_path = re.sub(
+        r"^(?:please\s+)?(?:read|open|summari[sz]e|analy[sz]e|close)\s+"
+        r"(?:(?:the\s+)?(?:file|document)\s+)?",
+        "", raw, flags=re.I).strip().strip('"').strip("'")
+    if raw_path and os.path.isfile(raw_path):
+        return os.path.abspath(raw_path)
+    name = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
     if name:
-        for p in S.get("last_file_matches") or []:
-            base = os.path.basename(p).lower()
-            if name in (base, os.path.splitext(base)[0]) or name in base:
-                return p
+        for path in S.get("last_file_matches") or []:
+            base = re.sub(r"[^a-z0-9]+", " ", os.path.basename(path).lower()).strip()
+            if name == base or name in base:
+                return path
     return name if name and os.path.isfile(name) else None
 
 
 # ---------- WhatsApp / Instagram voice commands (the browser work lives in messaging_agent.py) ----------
 _SEND_RE = re.compile(
-    r"^(?:send|text|message|whatsapp)\s+(?:a\s+)?(?:whatsapp\s+)?(?:message\s+|text\s+)?(?:to\s+)?"
-    r"(.+?)\s+(?:saying|that says|and say|say|that)\s+(.+)$")
+    r"^(?:please\s+)?(?:send|text|message|whatsapp)\s+(?:a\s+)?(?:whatsapp\s+)?"
+    r"(?:message\s+|text\s+)?(?:to\s+)?(.+?)\s+(?:saying|that says|and say|say|that)[:,]?\s+(.+)$",
+    re.I)
 _READ_RES = [
     re.compile(r"^(?:read|show|check)(?:\s+me)?(?:\s+my)?(?:\s+whatsapp)?(?:\s+(?:messages?|chats?|texts?))?"
                r"\s+(?:from|of|with)\s+(.+)$"),
@@ -1180,18 +1232,51 @@ ALERT_INSTAGRAM = True       # set False if you'd rather not keep an Instagram t
 _alerts = {"wanted": MESSAGE_ALERTS}
 
 
+_social_alert_queue = queue.Queue(maxsize=20)
+_social_alert_worker_lock = threading.Lock()
+_social_alert_worker_started = False
+
+
+def _social_alert_worker():
+    """One bounded worker handles message alerts; bursts cannot create unlimited threads."""
+    while True:
+        text = _social_alert_queue.get()
+        try:
+            notify("Messages", text)
+            toast("jarvis", text, title="Messages")
+            if S["asleep"]:
+                ui.log_line("sys", text)
+                continue
+            with busy:
+                play_chime()
+                speak(text)
+        except Exception:
+            traceback.print_exc()
+        finally:
+            _social_alert_queue.task_done()
+
+
 def on_social_alert(text):
-    """Called from the messaging thread the moment a new message is spotted."""
-    def run():
-        notify("Messages", text)
-        toast("jarvis", text, title="Messages")
-        if S["asleep"]:
-            ui.log_line("sys", text)            # asleep: just show it, don't talk
+    """Queue message alerts without spawning one thread per incoming message."""
+    global _social_alert_worker_started
+    try:
+        _social_alert_queue.put_nowait(text)
+    except queue.Full:
+        # Keep the newest context when a burst outpaces speech playback.
+        try:
+            _social_alert_queue.get_nowait()
+            _social_alert_queue.task_done()
+        except queue.Empty:
+            pass
+        try:
+            _social_alert_queue.put_nowait(text)
+        except queue.Full:
             return
-        with busy:
-            play_chime()
-            speak(text)
-    threading.Thread(target=run, daemon=True).start()
+
+    with _social_alert_worker_lock:
+        if not _social_alert_worker_started:
+            _social_alert_worker_started = True
+            threading.Thread(target=_social_alert_worker, daemon=True, name="social-alerts").start()
 
 
 def start_message_alerts():
@@ -1621,7 +1706,7 @@ def handle_social_command(c):
 
 def handle_social_send_command(c):
     """'send a message to mom saying I'll be late' -> reads it back and only sends after a yes."""
-    m = _SEND_RE.match(c.lower())
+    m = _SEND_RE.match(_original_command(c)) or _SEND_RE.match(c)
     if not m:
         return False
     contact, body = m.group(1).strip(), m.group(2).strip()
@@ -1707,11 +1792,8 @@ if not convs and _old_history:                       # migrate the old single-hi
 def save_convs():
     with conv_lock:
         data = {"convs": [c for c in convs if c["log"]]}
-        tmp = CONV_FILE + ".tmp"
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-            os.replace(tmp, CONV_FILE)
+            _atomic_json_save(CONV_FILE, data)
         except Exception:
             traceback.print_exc()
 
@@ -2036,6 +2118,7 @@ class Ears:
         self.noise = 0.004
         self._kw_reset = self._clear_vad = False
         self.stream, self.src_sr = None, 16000
+        self.last_block_at = time.monotonic()
         self.silero, self._sbuf, self._sp = None, np.zeros(0, np.float32), 0.0
         if USE_SILERO and load_silero_vad is not None:
             try:
@@ -2043,7 +2126,8 @@ class Ears:
                 print("Voice detection: Silero VAD")
             except Exception as e:
                 print("Silero VAD not available, using the loudness check:", e)
-        threading.Thread(target=self._loop, daemon=True).start()
+        self.worker = threading.Thread(target=self._loop, daemon=True, name="jarvis-ears")
+        self.worker.start()
 
     def open(self, dev=None):
         self.close()
@@ -2055,6 +2139,7 @@ class Ears:
                 self.stream = sd.InputStream(device=dev, samplerate=rate, channels=1, dtype="int16",
                                              blocksize=int(rate * 0.05), callback=self._cb)
                 self.stream.start()
+                self.last_block_at = time.monotonic()
                 return info["name"]
             except Exception as e:
                 last, self.stream = e, None
@@ -2075,6 +2160,18 @@ class Ears:
             x = np.interp(np.linspace(0, len(x) - 1, self.BLOCK), np.arange(len(x)),
                           x.astype(np.float32)).astype(np.int16)
         self.q.put(x.copy())
+
+    def shutdown(self):
+        """Close the stream and stop the background consumer before replacing this engine."""
+        self.close()
+        while True:
+            try:
+                self.q.get_nowait()
+            except queue.Empty:
+                break
+        self.q.put(None)
+        if self.worker.is_alive():
+            self.worker.join(timeout=1)
 
     def reset(self):
         """Throws away any half-heard sound (used when the microphone is switched off)."""
@@ -2131,6 +2228,9 @@ class Ears:
         last_dbg = time.time()
         while True:
             blk = self.q.get()
+            if blk is None:
+                return
+            self.last_block_at = time.monotonic()
             lvl = float(np.sqrt(np.mean((blk.astype(np.float32) / 32768.0) ** 2)))
 
             if self._clear_vad:
@@ -2289,22 +2389,32 @@ def listen_text(timeout=None):
 
 
 def confirm_input(timeout=15):
-    """Waits for a typed OR spoken answer. Returns (text, was_spoken) or None on timeout."""
+    """Wait for a typed OR spoken answer without consuming queued UI events."""
     end = time.time() + timeout
-    while time.time() < end:
-        try:
-            raw = text_q.get_nowait()
-            if not raw.startswith("\x00"):
+    deferred_events = []
+    try:
+        while time.time() < end:
+            try:
+                raw = text_q.get_nowait()
+                if raw.startswith("\x00"):
+                    deferred_events.append(raw)
+                    continue
                 return " ".join(re.sub(r"[^a-z0-9' ]", " ", raw.lower()).split()), False
-        except queue.Empty:
-            pass
-        audio = ears.next_utterance(0.2)
-        if audio is not None:
-            if not voice_ok(audio, "confirm"):       # a stranger cannot answer "yes" for you
+            except queue.Empty:
+                pass
+            if ears is None:
+                time.sleep(0.2)
                 continue
-            set_state("thinking")
-            return transcribe(audio), True
-    return None
+            audio = ears.next_utterance(0.2)
+            if audio is not None:
+                if not voice_ok(audio, "confirm"):
+                    continue
+                set_state("thinking")
+                return transcribe(audio), True
+        return None
+    finally:
+        for event in deferred_events:
+            text_q.put(event)
 
 
 # ================= VOICE (Piper, one voice per persona) =================
@@ -3176,11 +3286,14 @@ def handle_persona(text):
 
 
 def strip_wake(text, key=None):
-    for k in ([key] if key else list(PERSONAS)):
-        for w in PERSONAS[k]["wake"]:
-            pat = rf"\b{re.escape(w)}\b"
-            if re.search(pat, text):
-                return True, " ".join(re.sub(pat, " ", text, count=1).split())
+    """Strip a wake word only at the start, so names mentioned later remain intact."""
+    greeting = r"(?:(?:hey|hi|hello|okay|ok|yo|please)[,.:;!?-]?\s+)?"
+    for persona_key in ([key] if key else list(PERSONAS)):
+        for wake in PERSONAS[persona_key]["wake"]:
+            pattern = rf"^\s*{greeting}{re.escape(wake)}(?=$|[\s,.:;!?-])[\s,.:;!?-]*"
+            match = re.match(pattern, text, flags=re.I)
+            if match:
+                return True, text[match.end():].strip()
     return False, text
 
 
@@ -5368,6 +5481,21 @@ def clean_command(c):
     return " ".join(words)
 
 
+def _original_command(normalized):
+    """Return typed text with punctuation/case intact, minus the active wake word."""
+    raw = S.get("raw_text")
+    if not raw:
+        return normalized
+    greeting = r"(?:(?:hey|hi|hello|okay|ok|yo|please)[,.:;!?-]?\s+)?"
+    for wake in PERSONAS.get(cur_key, {}).get("wake", ()):
+        pattern = rf"^\s*{greeting}{re.escape(wake)}(?=$|[\s,.:;!?-])[\s,.:;!?-]*"
+        raw, count = re.subn(pattern, "", raw, count=1, flags=re.I)
+        if count:
+            break
+    raw = " ".join(raw.split())
+    return raw or normalized
+
+
 def handle_action(c):
     if c in ("apply patch", "apply the patch", "apply fix", "yes apply patch", "apply code fix"):
         if healer.pending_patch:
@@ -5509,7 +5637,15 @@ def ask(command, tokens=None):
                               json={"model": mdl, "messages": [build_system(command)] + context(msgs),
                                     "stream": False, "keep_alive": MODEL_KEEP_ALIVE,
                                     "options": {"num_predict": limit}}, timeout=600)
-            box["reply"] = r.json()["message"]["content"]
+            r.raise_for_status()
+            payload = r.json()
+            if isinstance(payload, dict) and payload.get("error"):
+                raise RuntimeError(str(payload["error"]))
+            message = payload.get("message") if isinstance(payload, dict) else None
+            reply = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(reply, str) or not reply.strip():
+                raise RuntimeError("Ollama returned an empty or malformed chat response.")
+            box["reply"] = reply
             _note_loaded(mdl)
         except Exception as e:
             box["err"] = e
@@ -5979,11 +6115,16 @@ def _plain(text):
     return re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()
 
 
+def _contains_phrase(haystack, needle):
+    """Match a complete remembered phrase, not an accidental substring inside another word."""
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", haystack))
+
+
 def already_known(keep):
     k = _plain(keep)
     for m in all_memories() + list(profile.get("declined", [])):
         n = _plain(m)
-        if k == n or k in n:                             # the same fact, or already part of a longer one
+        if k == n or _contains_phrase(n, k):              # the same fact, or already part of a longer one
             return True
         if len(k) >= 20 and len(n) >= 20 and difflib.SequenceMatcher(None, k, n).ratio() >= 0.93:
             return True                                  # (only long sentences are compared loosely, so
@@ -6098,7 +6239,8 @@ def _route_impl(command):
               or handle_file_command(c) or handle_action(c) or handle_docqa_question(c)):
             return
     auto_pick(c or command)                                  # AUTO PERSONA: plain chat goes to whoever fits (follow-up or topic)
-    ask(command)
+    # Typed routing uses a normalized command, but the model must receive the original punctuation/code/math.
+    ask(_original_command(command))
 
 
 # ================= AGENTS: goals, Nova's code runner, screen agent, macros =================
@@ -6169,7 +6311,10 @@ def handle_agent_cancel(c):
 
 
 _GOAL_RE = re.compile(r"^(?:goal\b|(?:please )?(?:research|find out about|look into)\b.*\b(?:and|then)\b.*"
-                      r"\b(?:summari[sz]e|compare|write|create|make|save|list)\b)")
+                      r"\b(?:summari[sz]e|compare|write|create|make|save|list)\b)", re.I)
+_GOAL_CODE_RUN_RE = re.compile(
+    r"\b(?:run|execute|test)\b.{0,60}\b(?:python|script|code)\b|"
+    r"\b(?:python|script|code)\b.{0,60}\b(?:run|execute|test)\b", re.I)
 
 
 def handle_goal(c):
@@ -6179,11 +6324,21 @@ def handle_goal(c):
     if _agent_busy():
         return True
     _agent_models()
-    goal = re.sub(r"^goal[:,]?\s*", "", c)
+    source = _original_command(c)
+    goal = re.sub(r"^goal[:,]?\s*", "", source, flags=re.I)
+    allow_code = bool(_GOAL_CODE_RUN_RE.search(goal))
+    if allow_code:
+        with as_persona("karen", switch=False):
+            speak("This goal asks me to run generated Python code with Jarvis's Windows account permissions. "
+                  "It is not an isolated sandbox. Do you approve?")
+        answer = confirm_input(timeout=30)
+        if not answer or answer[0] not in YES_WORDS:
+            speak("Cancelled. I will not run generated code for this goal.")
+            return True
 
     def work():
         say = lambda t: _say_as("karen", t)
-        res = planner_agent.run_goal(goal, say=say)
+        res = planner_agent.run_goal(goal, say=say, allow_code=allow_code)
         say(res["answer"])
     _run_agent("goal", work)
     return True
@@ -6232,11 +6387,19 @@ def handle_code_run(c):
     if _agent_busy():
         return True
     model = _agent_models()
+    with as_persona("friday"):
+        speak("Nova can generate and execute a Python script with Jarvis's Windows account permissions. "
+              "It is not an isolated sandbox. Do you approve running generated code?")
+    answer = confirm_input(timeout=30)
+    if not answer or answer[0] not in YES_WORDS:
+        speak("Cancelled. I will not run the generated code.")
+        return True
 
     def work():
         say = lambda t: _say_as("friday", t)
         say("On it. I'll write it, run it, and fix any errors myself.")
-        res = code_executor.solve(c, model=model, say=say, cancel=_agent["cancel"])
+        task = _original_command(c)
+        res = code_executor.solve(task, model=model, say=say, cancel=_agent["cancel"], approved=True)
         if res.ok:
             out = res.stdout.strip() or "It ran without printing anything."
             out = out[:400] + (" ... and more." if len(out) > 400 else "")
@@ -6423,14 +6586,16 @@ def _phone_ring_command(audio):
     return False
 
 
-_PHONE_TASK = re.compile(r"^(?:please\s+)?(?:on|with)\s+my\s+phone[,:]?\s*(?:and\s+)?(.+)$")
+_PHONE_TASK = re.compile(r"^(?:please\s+)?(?:on|with)\s+my\s+phone[,:]?\s*(?:and\s+)?(.+)$", re.I)
 
 
 def handle_phone_task(c):
     """'on my phone, open the camera and take a photo' - looks at the phone's screen, then taps, types and swipes."""
     if phone_screen_agent is None or phone is None:
         return False
-    m = _PHONE_TASK.match(c)
+    m = _PHONE_TASK.match(_original_command(c))
+    if not m:
+        m = _PHONE_TASK.match(c)
     if not m:
         return False
     goal = m.group(1).strip()
@@ -6847,24 +7012,27 @@ def handle_event(ev):
 def text_loop():
     while True:
         raw = text_q.get()
-        if raw.startswith("\x00"):
-            with busy:
+        # Do not steal a confirmation answer from an audio command currently holding busy.
+        if not busy.acquire(blocking=False):
+            text_q.put(raw)
+            time.sleep(0.05)
+            continue
+        try:
+            if raw.startswith("\x00"):
                 try:
                     handle_event(raw)
                 except Exception as e:
                     traceback.print_exc()
                     ui.log_line("sys", f"Error: {e}")
-                finally:
-                    set_state("sleep" if (S["asleep"] or not S["awake"]) else "listening")
-            continue
-        cmd = " ".join(re.sub(r"[^a-z0-9' ]", " ", raw.lower()).split())
-        _, cmd = strip_wake(cmd, cur_key)
-        if not cmd:
-            continue
-        with busy:
+                continue
+
+            cmd = " ".join(re.sub(r"[^a-z0-9' ]", " ", raw.lower()).split())
+            _, cmd = strip_wake(cmd, cur_key)
+            if not cmd:
+                continue
             S["typed"] = True
             try:
-                if S["asleep"]:                           # typing wakes him up
+                if S["asleep"]:
                     wake_up(announce=(cmd in WAKE_CMDS))
                     if cmd in WAKE_CMDS:
                         continue
@@ -6883,13 +7051,14 @@ def text_loop():
                 else:
                     S["raw_text"] = raw
                     route(cmd)
-                    S["raw_text"] = None
             except Exception as e:
                 traceback.print_exc()
                 ui.log_line("sys", f"Error: {e}")
-            finally:
-                S["typed"] = False
-                set_state("sleep" if (S["asleep"] or not S["awake"]) else "listening")
+        finally:
+            S["raw_text"] = None
+            S["typed"] = False
+            set_state("sleep" if (S["asleep"] or not S["awake"]) else "listening")
+            busy.release()
 
 
 # ================= STARTUP + MAIN VOICE LOOP =================
@@ -6906,7 +7075,12 @@ def boot_ollama():
     for i in range(40):                                # the server may still be starting: wait up to ~40 s
         try:
             r = requests.get(f"{URL}/api/tags", timeout=3)
-            names = [m.get("name", "") for m in r.json().get("models", [])]
+            r.raise_for_status()
+            payload = r.json()
+            if not isinstance(payload, dict) or payload.get("error"):
+                raise RuntimeError(str(payload.get("error", "Invalid Ollama tags response"))
+                                   if isinstance(payload, dict) else "Invalid Ollama tags response")
+            names = [m.get("name", "") for m in payload.get("models", []) if isinstance(m, dict)]
             break
         except Exception:
             ui.boot_status("ollama", "loading", f"Waiting for server... {i + 1}s")
@@ -6933,7 +7107,18 @@ def boot_ollama():
                                    f"Run: ollama pull {m}")
     ui.boot_status("model", "loading", "Model Loading")
     try:                                               # loads it into RAM now, so the first answer is quick
-        requests.post(f"{URL}/api/generate", json={"model": llm_model(), "keep_alive": MODEL_KEEP_ALIVE}, timeout=900)
+        response = requests.post(
+            f"{URL}/api/generate",
+            json={"model": llm_model(), "keep_alive": MODEL_KEEP_ALIVE},
+            timeout=900,
+        )
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Ollama returned an invalid model-load response.") from exc
+        if isinstance(payload, dict) and payload.get("error"):
+            raise RuntimeError(str(payload["error"]))
         _note_loaded(llm_model())
         ui.boot_status("model", "ok", f"{llm_model()} ready")
         if PER_PERSONA_MODELS and WARM_SECOND_MODEL and MODELS_IN_RAM >= 2:
@@ -6982,6 +7167,11 @@ def init_models():
         vosk_model = Model(vosk_dir)
         names = wake_grammar(vosk_vocabulary(vosk_dir))
         gate = KaldiRecognizer(vosk_model, 16000, json.dumps(names + ["[unk]"]))
+        if ears is not None:
+            try:
+                ears.shutdown()
+            except Exception:
+                traceback.print_exc()
         ears = Ears(vosk_model)
         ui.boot_status("vosk", "ok", "Wake-word model ready")
     except Exception:
@@ -7025,7 +7215,14 @@ def jarvis_loop():
         apply_persona_ui()               # tell the window who is really active (it starts out as Jarvis)
 
         threading.Thread(target=boot_ollama, daemon=True).start()     # checks Ollama while the models load
-        init_models()
+        # Keep typed commands available even if a speech model is missing or fails to initialize.
+        threading.Thread(target=text_loop, daemon=True, name="jarvis-text").start()
+        speech_ready = False
+        try:
+            init_models()
+            speech_ready = ears is not None
+        except Exception as init_error:
+            ui.log_line("sys", f"Speech initialization failed; typed commands remain available: {init_error}")
 
         # Restore conversation and UI mode if saved
         if saved:
@@ -7039,7 +7236,7 @@ def jarvis_loop():
                 ui.set_sleep(True)
                 set_state("sleep")
 
-        for fn in (get_start_apps, get_theme, text_loop, mic_watchdog, auto_sleep_watchdog):
+        for fn in (get_start_apps, get_theme, mic_watchdog, auto_sleep_watchdog):
             threading.Thread(target=fn, daemon=True).start()
         start_message_alerts()
 
@@ -7076,94 +7273,131 @@ def jarvis_loop():
         if PHONE_ENABLED and phone_agent is not None:
             start_phone()                                           # notices a phone on USB, announces calls
 
-        speak(f"{P()['name']} online and ready.")
+        if speech_ready:
+            speak(f"{P()['name']} online and ready.")
+        else:
+            ui.log_line("sys", "Jarvis started in typed-command mode; speech will retry automatically.")
 
+        loop_failures = 0
         while True:
+            try:
 
-            S["awake"] = False
-            set_state("sleep")
-            audio = ears.next_utterance()
-            if phone_ringing_active() and not S["asleep"] and _phone_ring_command(audio):
-                continue                                # phone ringing: "answer" / "decline" need no wake name
-            words = gate_words(audio)
-            key = next((PERSONA_WORDS[w] for w in words if w in PERSONA_WORDS), None)
-            if (key or "wake" in words) and not voice_ok(audio, "wake"):
-                continue                                # someone else said it: ignore completely
+                S["awake"] = False
+                set_state("sleep")
+                if S["mic_off"]:
+                    time.sleep(0.2)
+                    continue
+                audio = ears.next_utterance(timeout=2)
+                if audio is None:
+                    if S["mic_off"]:
+                        continue
+                    stream = getattr(ears, "stream", None)
+                    last_block = getattr(ears, "last_block_at", 0.0)
+                    stream_active = bool(stream is not None and stream.active)
+                    if ((not stream_active or time.monotonic() - last_block > 10)
+                            and not busy.locked() and not mic_lock.locked()):
+                        raise RuntimeError("Microphone input stream stopped responding")
+                    continue
+                loop_failures = 0
+                if phone_ringing_active() and not S["asleep"] and _phone_ring_command(audio):
+                    continue                                # phone ringing: "answer" / "decline" need no wake name
+                words = gate_words(audio)
+                key = next((PERSONA_WORDS[w] for w in words if w in PERSONA_WORDS), None)
+                if (key or "wake" in words) and not voice_ok(audio, "wake"):
+                    continue                                # someone else said it: ignore completely
 
-            from_sleep = False
-            if S["asleep"]:
-                if not key and "wake" not in words:
-                    continue                            # still asleep: ignore everything else
-                with busy:
-                    wake_up(announce=False)             # reload the speech models quietly
-                from_sleep = True
-            elif not key:
-                continue
-            if key:
-                if key != "ultron":
-                    _auto["home"] = key                   # you called an assistant by name: that is your pick now
-            else:
-                auto_return_check()                       # AUTO PERSONA: quiet for a while -> back to your assistant
-            key = key or cur_key
-            S["last"] = time.time()
-
-            summoned = False
-            if key != cur_key:
-                with busy:
-                    if key == "ultron":
-                        if not ultron_gate():           # double warning; "no" = back to standby
-                            continue
-                        switch_persona("ultron")
-                        summoned = True
-                    else:
-                        switch_persona(key, quiet=True)
-
-            S["awake"] = True
-            if not active["pinned"]:
-                active["conv"] = None                   # every wake-up starts a new conversation
-                push_convs()
-
-            command = ""
-            if not summoned:
-                set_state("thinking")
-                text = transcribe(audio)
-                print("Heard:", text)
-                woke, command = strip_wake(text, key)
-                if not woke:
-                    command = text
-                if command in WAKE_CMDS:
-                    command = ""
-                if not command:
+                from_sleep = False
+                if S["asleep"]:
+                    if not key and "wake" not in words:
+                        continue                            # still asleep: ignore everything else
                     with busy:
-                        speak(woke_line() if from_sleep else P().get("yes", "Yes?"))
+                        wake_up(announce=False)             # reload the speech models quietly
+                    from_sleep = True
+                elif not key:
+                    continue
+                if key:
+                    if key != "ultron":
+                        _auto["home"] = key                   # you called an assistant by name: that is your pick now
+                else:
+                    auto_return_check()                       # AUTO PERSONA: quiet for a while -> back to your assistant
+                key = key or cur_key
+                S["last"] = time.time()
 
-            while True:
-                if command:
-                    emit("you", command)
-                    if command in EXIT_WORDS:
+                summoned = False
+                if key != cur_key:
+                    with busy:
+                        if key == "ultron":
+                            if not ultron_gate():           # double warning; "no" = back to standby
+                                continue
+                            switch_persona("ultron")
+                            summoned = True
+                        else:
+                            switch_persona(key, quiet=True)
+
+                S["awake"] = True
+                if not active["pinned"]:
+                    active["conv"] = None                   # every wake-up starts a new conversation
+                    push_convs()
+
+                command = ""
+                if not summoned:
+                    set_state("thinking")
+                    text = transcribe(audio)
+                    print("Heard:", text)
+                    woke, command = strip_wake(text, key)
+                    if not woke:
+                        command = text
+                    if command in WAKE_CMDS:
+                        command = ""
+                    if not command:
                         with busy:
-                            speak(P().get("bye", "Goodbye."))
-                        ui.quit()
-                        return
-                    if command in NOOP_WORDS:
-                        break
-                    with busy:
-                        S["typed"] = False
-                        route(command)
-                    if S["asleep"]:                     # "go to sleep" ends the conversation
-                        break
-                set_state("listening")
-                print(f"Listening for follow-up ({FOLLOWUP_SECONDS}s)...")
-                nxt = listen_text(FOLLOWUP_SECONDS)
-                if S["asleep"] or nxt is None:
-                    break
-                _, command = strip_wake(nxt, cur_key)
-                print("You:", command)
+                            speak(woke_line() if from_sleep else P().get("yes", "Yes?"))
 
-            print("Going back to sleep." if S["asleep"] else "Going back to standby.")
-            active["pinned"] = False
-            if not S["asleep"]:
-                finalize_active()
+                while True:
+                    if command:
+                        emit("you", command)
+                        if command in EXIT_WORDS:
+                            with busy:
+                                speak(P().get("bye", "Goodbye."))
+                            ui.quit()
+                            return
+                        if command in NOOP_WORDS:
+                            break
+                        with busy:
+                            S["typed"] = False
+                            route(command)
+                        if S["asleep"]:                     # "go to sleep" ends the conversation
+                            break
+                    set_state("listening")
+                    print(f"Listening for follow-up ({FOLLOWUP_SECONDS}s)...")
+                    nxt = listen_text(FOLLOWUP_SECONDS)
+                    if S["asleep"] or nxt is None:
+                        break
+                    _, command = strip_wake(nxt, cur_key)
+                    print("You:", command)
+
+                print("Going back to sleep." if S["asleep"] else "Going back to standby.")
+                active["pinned"] = False
+                if not S["asleep"]:
+                    finalize_active()
+            except Exception as loop_error:
+                loop_failures += 1
+                delay = min(30, 2 ** min(loop_failures, 5))
+                S["awake"] = False
+                S["typed"] = False
+                S["raw_text"] = None
+                active["pinned"] = False
+                set_state("error")
+                ui.log_line("sys", f"Voice loop error; retrying in {delay}s: {loop_error}")
+                time.sleep(delay)
+                if loop_failures >= 3 and loop_failures % 3 == 0:
+                    try:
+                        with busy:
+                            with mic_lock:
+                                init_models()
+                        loop_failures = 0
+                    except Exception as init_error:
+                        ui.log_line("sys", f"Speech reinitialization failed: {init_error}")
     except Exception as e:
         traceback.print_exc()
         set_state("error")

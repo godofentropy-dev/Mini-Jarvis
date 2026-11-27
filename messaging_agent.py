@@ -4,7 +4,7 @@ import queue
 import re
 import time
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -37,6 +37,7 @@ _STOP = object()
 
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 MAX_IMAGE_BYTES = 16 * 1024 * 1024   # WhatsApp's limit for photos
+STOP_TIMEOUT = 5.0                  # shutdown stays bounded even if a browser is stuck
 
 # Lines inside a WhatsApp chat row that are NOT the message preview (times / dates)
 TIME_RE = re.compile(
@@ -188,6 +189,10 @@ class SocialAgent:
             self._jobs.put((fut, fn, args, kw))
             try:
                 return fut.result(timeout=timeout)
+            except FutureTimeoutError:
+                # Prevent a timed-out queued action from running later without its caller knowing.
+                fut.cancel()
+                raise
             except _WorkerStopped:
                 time.sleep(0.4)
         raise RuntimeError("the messaging browser keeps stopping")
@@ -199,11 +204,13 @@ class SocialAgent:
             return f"{label}: Failed. Error: {e}"
 
     def stop(self):
-        """Closes the background browser (it restarts by itself on the next request)."""
+        """Closes the background browser; returns False if it did not stop in time."""
         t = self._thread
-        if t and t.is_alive():
-            self._jobs.put(_STOP)
-            t.join(timeout=20)
+        if not t or not t.is_alive():
+            return True
+        self._jobs.put(_STOP)
+        t.join(timeout=STOP_TIMEOUT)
+        return not t.is_alive()
 
     def _page(self, kind):
         """One persistent tab per site (worker thread only)."""
@@ -239,7 +246,8 @@ class SocialAgent:
     @contextmanager
     def _visible_session(self):
         was_watching = self._alerts_on
-        self.stop()  # the profile can only be open in one browser at a time
+        if not self.stop():  # never open a second context against a profile still in use
+            raise RuntimeError("The messaging browser is still shutting down. Try again in a moment.")
         try:
             with sync_playwright() as p:
                 ctx = self._launch(p, headless=False)

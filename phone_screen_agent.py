@@ -66,7 +66,14 @@ def adb_text(text):
     return re.sub(r"([&|;<>()$`\\\"'*?#~!{}\[\]])", r"\\\1", text).replace(" ", "%s")
 
 
-def risk_reason(action, elems):
+def risk_reason(action, elems, state=None, history=None):
+    if (history and history[-1].startswith("typed ")
+            and action.get("action") in ("key", "tap")):
+        return "confirming the next phone action after entering text"
+    if (action.get("action") == "key" and str(action.get("key", "")).lower() == "enter"
+            and state and isinstance(state.get("field"), dict)
+            and state["field"].get("editable")):
+        return "submitting the text you just entered"
     if action.get("action") == "tap":
         try:
             el = next(e for e in elems if e["id"] == int(action.get("id")))
@@ -202,7 +209,7 @@ def run_task(phone, goal, say=print, confirm=None, cancel=None, max_steps=MAX_ST
                 continue
             if action.get("action") == "done":
                 return action.get("answer") or "Done."
-            why = risk_reason(action, elems)
+            why = risk_reason(action, elems, state, history)
             if why:
                 ok = confirm(f"I'm about to do {why} on your phone. Should I go ahead?") if confirm else False
                 if not ok:

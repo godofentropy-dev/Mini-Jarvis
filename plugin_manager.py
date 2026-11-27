@@ -21,6 +21,7 @@ Why this design:
 NOTE: load_one() executes the file to read its META. That is fine for plugins you wrote or reviewed.
 Before generated code is ever loaded (phase 2), it must pass an ast check and your approval first.
 """
+import ast
 import importlib.util
 import os
 import re
@@ -35,6 +36,67 @@ LOG_FILE = os.path.join(BASE, "plugins.log")
 
 KNOWN_PERMISSIONS = {"phone", "phone_unlock"}      # grows as JARVIS gains safe helpers
 MAX_FAILURES = 3
+SAFE_PLUGIN_IMPORTS = {"re", "json", "math", "time", "datetime", "collections", "typing"}
+
+
+def _validate_plugin_source(path):
+    """Reject top-level executable plugin code before importing the module."""
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            source = stream.read()
+        tree = ast.parse(source, filename=path)
+    except (OSError, SyntaxError, UnicodeError) as exc:
+        return False, f"could not parse plugin: {exc}"
+
+    for node in tree.body:
+        # Module docstring.
+        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            continue
+        if isinstance(node, ast.Import):
+            names = [alias.name.split(".")[0] for alias in node.names]
+            if any(name not in SAFE_PLUGIN_IMPORTS for name in names):
+                return False, "top-level imports must use the safe standard-library allowlist"
+            continue
+        if isinstance(node, ast.ImportFrom):
+            if node.level or node.module not in SAFE_PLUGIN_IMPORTS:
+                return False, "top-level imports must use the safe standard-library allowlist"
+            continue
+        if isinstance(node, ast.Assign):
+            if not all(isinstance(target, ast.Name) and target.id.isupper() for target in node.targets):
+                return False, "top-level assignments must use uppercase constant names"
+            try:
+                ast.literal_eval(node.value)
+            except (ValueError, TypeError, SyntaxError):
+                return False, "top-level assignments must contain literal data only"
+            continue
+        if isinstance(node, ast.AnnAssign):
+            if (not isinstance(node.target, ast.Name) or not node.target.id.isupper()
+                    or node.value is None or node.annotation is not None):
+                return False, "top-level assignments must use uppercase constants with literal values"
+            try:
+                ast.literal_eval(node.value)
+            except (ValueError, TypeError, SyntaxError):
+                return False, "top-level assignments must contain literal data only"
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+            if node.args.vararg:
+                arguments.append(node.args.vararg)
+            if node.args.kwarg:
+                arguments.append(node.args.kwarg)
+            if node.decorator_list or node.returns or any(arg.annotation for arg in arguments):
+                return False, "plugin functions cannot use import-time decorators or annotations"
+            try:
+                for default in node.args.defaults + node.args.kw_defaults:
+                    if default is not None:
+                        ast.literal_eval(default)
+            except (ValueError, TypeError, SyntaxError):
+                return False, "plugin function defaults must be literal values"
+            continue
+        return False, f"unsupported top-level statement: {type(node).__name__}"
+
+    return True, ""
 
 
 class PluginContext:
@@ -120,7 +182,16 @@ class PluginManager:
         modname = f"jarvis_plugin_{stem}"
         sys.modules.pop(modname, None)                    # forget the old copy so edits take effect
         try:
-            spec = importlib.util.spec_from_file_location(modname, path)
+            root = os.path.realpath(PLUGIN_DIR)
+            real_path = os.path.realpath(path)
+            if os.path.commonpath([root, real_path]) != root or not os.path.isfile(real_path):
+                return False, "plugin path is outside the plugins folder"
+            valid, reason = _validate_plugin_source(real_path)
+            if not valid:
+                return False, reason
+            spec = importlib.util.spec_from_file_location(modname, real_path)
+            if spec is None or spec.loader is None:
+                return False, "could not create a plugin loader"
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             meta = getattr(mod, "META", None)
@@ -138,7 +209,7 @@ class PluginManager:
         except Exception as e:
             self._log(f"load failed for {stem}:\n{traceback.format_exc()}")
             return False, f"{type(e).__name__}: {e}"
-        self.plugins[name] = Plugin(name, meta.get("description", ""), triggers, perms, mod, path)
+        self.plugins[name] = Plugin(name, meta.get("description", ""), triggers, perms, mod, real_path)
         return True, name
 
     def reload_all(self):

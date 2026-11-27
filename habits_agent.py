@@ -25,6 +25,8 @@ import datetime as dt
 import difflib
 import json
 import os
+
+from safe_pickle import atomic_json_write
 import re
 
 DAY_STARTS_HOUR = 4                 # before 4 AM still counts as yesterday
@@ -146,11 +148,8 @@ class Habits:
 
     def _save(self):
         try:
-            tmp = self.path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"habits": self.habits}, f, ensure_ascii=False, indent=1)
-            os.replace(tmp, self.path)
-        except Exception:
+            atomic_json_write(self.path, {"habits": self.habits})
+        except OSError:
             pass
 
     @staticmethod

@@ -2363,25 +2363,32 @@ def listen_text(timeout=None):
 
 
 def confirm_input(timeout=15):
-    """Waits for a typed OR spoken answer. Returns (text, was_spoken) or None on timeout."""
+    """Wait for a typed OR spoken answer without consuming queued UI events."""
     end = time.time() + timeout
-    while time.time() < end:
-        try:
-            raw = text_q.get_nowait()
-            if not raw.startswith("\x00"):
+    deferred_events = []
+    try:
+        while time.time() < end:
+            try:
+                raw = text_q.get_nowait()
+                if raw.startswith("\\x00"):
+                    deferred_events.append(raw)
+                    continue
                 return " ".join(re.sub(r"[^a-z0-9' ]", " ", raw.lower()).split()), False
-        except queue.Empty:
-            pass
-        if ears is None:
-            time.sleep(0.2)
-            continue
-        audio = ears.next_utterance(0.2)
-        if audio is not None:
-            if not voice_ok(audio, "confirm"):       # a stranger cannot answer "yes" for you
+            except queue.Empty:
+                pass
+            if ears is None:
+                time.sleep(0.2)
                 continue
-            set_state("thinking")
-            return transcribe(audio), True
-    return None
+            audio = ears.next_utterance(0.2)
+            if audio is not None:
+                if not voice_ok(audio, "confirm"):
+                    continue
+                set_state("thinking")
+                return transcribe(audio), True
+        return None
+    finally:
+        for event in deferred_events:
+            text_q.put(event)
 
 
 # ================= VOICE (Piper, one voice per persona) =================
@@ -6943,24 +6950,27 @@ def handle_event(ev):
 def text_loop():
     while True:
         raw = text_q.get()
-        if raw.startswith("\x00"):
-            with busy:
+        # Do not steal a confirmation answer from an audio command currently holding busy.
+        if not busy.acquire(blocking=False):
+            text_q.put(raw)
+            time.sleep(0.05)
+            continue
+        try:
+            if raw.startswith("\\x00"):
                 try:
                     handle_event(raw)
                 except Exception as e:
                     traceback.print_exc()
                     ui.log_line("sys", f"Error: {e}")
-                finally:
-                    set_state("sleep" if (S["asleep"] or not S["awake"]) else "listening")
-            continue
-        cmd = " ".join(re.sub(r"[^a-z0-9' ]", " ", raw.lower()).split())
-        _, cmd = strip_wake(cmd, cur_key)
-        if not cmd:
-            continue
-        with busy:
+                continue
+
+            cmd = " ".join(re.sub(r"[^a-z0-9' ]", " ", raw.lower()).split())
+            _, cmd = strip_wake(cmd, cur_key)
+            if not cmd:
+                continue
             S["typed"] = True
             try:
-                if S["asleep"]:                           # typing wakes him up
+                if S["asleep"]:
                     wake_up(announce=(cmd in WAKE_CMDS))
                     if cmd in WAKE_CMDS:
                         continue
@@ -6979,14 +6989,14 @@ def text_loop():
                 else:
                     S["raw_text"] = raw
                     route(cmd)
-                    S["raw_text"] = None
             except Exception as e:
                 traceback.print_exc()
                 ui.log_line("sys", f"Error: {e}")
-            finally:
-                S["raw_text"] = None
-                S["typed"] = False
-                set_state("sleep" if (S["asleep"] or not S["awake"]) else "listening")
+        finally:
+            S["raw_text"] = None
+            S["typed"] = False
+            set_state("sleep" if (S["asleep"] or not S["awake"]) else "listening")
+            busy.release()
 
 
 # ================= STARTUP + MAIN VOICE LOOP =================

@@ -5593,7 +5593,15 @@ def ask(command, tokens=None):
                               json={"model": mdl, "messages": [build_system(command)] + context(msgs),
                                     "stream": False, "keep_alive": MODEL_KEEP_ALIVE,
                                     "options": {"num_predict": limit}}, timeout=600)
-            box["reply"] = r.json()["message"]["content"]
+            r.raise_for_status()
+            payload = r.json()
+            if isinstance(payload, dict) and payload.get("error"):
+                raise RuntimeError(str(payload["error"]))
+            message = payload.get("message") if isinstance(payload, dict) else None
+            reply = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(reply, str) or not reply.strip():
+                raise RuntimeError("Ollama returned an empty or malformed chat response.")
+            box["reply"] = reply
             _note_loaded(mdl)
         except Exception as e:
             box["err"] = e
@@ -6063,11 +6071,16 @@ def _plain(text):
     return re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()
 
 
+def _contains_phrase(haystack, needle):
+    """Match a complete remembered phrase, not an accidental substring inside another word."""
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", haystack))
+
+
 def already_known(keep):
     k = _plain(keep)
     for m in all_memories() + list(profile.get("declined", [])):
         n = _plain(m)
-        if k == n or k in n:                             # the same fact, or already part of a longer one
+        if k == n or _contains_phrase(n, k):              # the same fact, or already part of a longer one
             return True
         if len(k) >= 20 and len(n) >= 20 and difflib.SequenceMatcher(None, k, n).ratio() >= 0.93:
             return True                                  # (only long sentences are compared loosely, so

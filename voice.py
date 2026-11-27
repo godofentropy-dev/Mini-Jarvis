@@ -2100,7 +2100,8 @@ class Ears:
                 print("Voice detection: Silero VAD")
             except Exception as e:
                 print("Silero VAD not available, using the loudness check:", e)
-        threading.Thread(target=self._loop, daemon=True).start()
+        self.worker = threading.Thread(target=self._loop, daemon=True, name="jarvis-ears")
+        self.worker.start()
 
     def open(self, dev=None):
         self.close()
@@ -2133,6 +2134,18 @@ class Ears:
             x = np.interp(np.linspace(0, len(x) - 1, self.BLOCK), np.arange(len(x)),
                           x.astype(np.float32)).astype(np.int16)
         self.q.put(x.copy())
+
+    def shutdown(self):
+        """Close the stream and stop the background consumer before replacing this engine."""
+        self.close()
+        while True:
+            try:
+                self.q.get_nowait()
+            except queue.Empty:
+                break
+        self.q.put(None)
+        if self.worker.is_alive():
+            self.worker.join(timeout=1)
 
     def reset(self):
         """Throws away any half-heard sound (used when the microphone is switched off)."""
@@ -2189,6 +2202,8 @@ class Ears:
         last_dbg = time.time()
         while True:
             blk = self.q.get()
+            if blk is None:
+                return
             self.last_block_at = time.monotonic()
             lvl = float(np.sqrt(np.mean((blk.astype(np.float32) / 32768.0) ** 2)))
 
@@ -7080,6 +7095,11 @@ def init_models():
         vosk_model = Model(vosk_dir)
         names = wake_grammar(vosk_vocabulary(vosk_dir))
         gate = KaldiRecognizer(vosk_model, 16000, json.dumps(names + ["[unk]"]))
+        if ears is not None:
+            try:
+                ears.shutdown()
+            except Exception:
+                traceback.print_exc()
         ears = Ears(vosk_model)
         ui.boot_status("vosk", "ok", "Wake-word model ready")
     except Exception:

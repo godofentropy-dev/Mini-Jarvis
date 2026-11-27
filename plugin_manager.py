@@ -72,7 +72,7 @@ def _validate_plugin_source(path):
             continue
         if isinstance(node, ast.AnnAssign):
             if (not isinstance(node.target, ast.Name) or not node.target.id.isupper()
-                    or node.value is None):
+                    or node.value is None or node.annotation is not None):
                 return False, "top-level assignments must use uppercase constants with literal values"
             try:
                 ast.literal_eval(node.value)
@@ -80,8 +80,12 @@ def _validate_plugin_source(path):
                 return False, "top-level assignments must contain literal data only"
             continue
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.decorator_list or node.returns or any(
-                    arg.annotation for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs):
+            arguments = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+            if node.args.vararg:
+                arguments.append(node.args.vararg)
+            if node.args.kwarg:
+                arguments.append(node.args.kwarg)
+            if node.decorator_list or node.returns or any(arg.annotation for arg in arguments):
                 return False, "plugin functions cannot use import-time decorators or annotations"
             try:
                 for default in node.args.defaults + node.args.kw_defaults:

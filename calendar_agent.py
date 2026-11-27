@@ -268,6 +268,17 @@ def parse_ics(text):
 
 
 # ====================================================================== repeating events
+def _select_positions(items, positions):
+    """Select RFC-style positive/negative positions from an ordered recurrence period."""
+    size = len(items)
+    return sorted({
+        items[index]
+        for position in positions
+        for index in (position - 1 if position > 0 else position,)
+        if -size <= index < size
+    })
+
+
 def _month_dates(y, m, rule, d0):
     """The dates in one month that a MONTHLY / YEARLY rule selects."""
     n = _cal.monthrange(y, m)[1]
@@ -295,7 +306,7 @@ def _month_dates(y, m, rule, d0):
     out = [date(y, m, dd) for dd in sorted(days)]
     pos = rule.get("BYSETPOS")
     if pos and out:
-        out = sorted({out[p - 1 if p > 0 else p] for p in pos if -len(out) <= (p - 1 if p > 0 else p) < len(out)})
+        out = _select_positions(out, pos)
     return out
 
 

@@ -7212,6 +7212,9 @@ def jarvis_loop():
 
                 S["awake"] = False
                 set_state("sleep")
+                if S["mic_off"]:
+                    time.sleep(0.2)
+                    continue
                 audio = ears.next_utterance(timeout=2)
                 if audio is None:
                     stream = getattr(ears, "stream", None)

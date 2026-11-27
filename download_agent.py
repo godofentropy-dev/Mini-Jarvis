@@ -358,7 +358,7 @@ def handle_download_command(text, speak=print, confirm=None, notify=None,
         if url_match and url_match.group(0).lower().startswith("http"):
             url = url_match.group(0).rstrip(".,)")
 
-            def job():
+            def download_pdf_url_job():
                 try:
                     path = download_pdf_from_url(url)
                     notify(f"Done. Saved {path.name} in your Downloads, Jarvis folder.")
@@ -366,7 +366,7 @@ def handle_download_command(text, speak=print, confirm=None, notify=None,
                     notify(f"I could not download that PDF. {_friendly(error)}")
 
             speak("Downloading the PDF now.")
-            run(job)
+            run(download_pdf_url_job)
             return True
 
         query = _clean_query(text)
@@ -374,7 +374,7 @@ def handle_download_command(text, speak=print, confirm=None, notify=None,
             speak("Which PDF should I download?")
             return True
 
-        def job():
+        def download_pdf_search_job():
             try:
                 _title, path = download_pdf_by_search(query)
                 notify(f"Done. I saved {path.name} in your Downloads, Jarvis folder.")
@@ -382,7 +382,7 @@ def handle_download_command(text, speak=print, confirm=None, notify=None,
                 notify(f"I could not get that PDF. {_friendly(error)}")
 
         speak(f"Looking for a PDF of {query}.")
-        run(job)
+        run(download_pdf_search_job)
         return True
 
     # ---------------- Song ----------------
@@ -409,7 +409,7 @@ def handle_download_command(text, speak=print, confirm=None, notify=None,
         speak("Okay, cancelled. To try again, say download, then the song and the artist.")
         return True
 
-    def job():
+    def download_song_job():
         try:
             path = _download_song(entry)
             notify(f"Done. {path.stem} is saved in your Music, Jarvis folder.")
@@ -417,7 +417,7 @@ def handle_download_command(text, speak=print, confirm=None, notify=None,
             notify(f"I could not download that song. {_friendly(error)}")
 
     speak("Downloading now.")
-    run(job)
+    run(download_song_job)
     return True
 
 

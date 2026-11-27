@@ -20,6 +20,7 @@ import urllib.request
 from safe_pickle import atomic_text_write
 
 from llm_utils import chat, DEFAULT_MODEL
+from download_agent import _validate_public_download_url
 
 PLAN_MODEL = DEFAULT_MODEL
 OUT_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Jarvis")
@@ -48,10 +49,18 @@ def _strip_html(raw):
     return re.sub(r"\s+", " ", html.unescape(raw)).strip()
 
 
+class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_public_download_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _fetch(url, limit=1500):
+    _validate_public_download_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Jarvis)"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        raw = r.read(400_000).decode("utf-8", errors="replace")
+    opener = urllib.request.build_opener(_PublicRedirectHandler())
+    with opener.open(req, timeout=15) as response:
+        raw = response.read(400_000).decode("utf-8", errors="replace")
     return _strip_html(raw)[:limit]
 
 

@@ -9,7 +9,7 @@ from jobs import DocIndex
 from self_healing_agent import SelfHealingAgent
 from code_executor import solve as solve_generated_code
 from download_agent import _validate_public_download_url
-from safe_pickle import load_numpy_pickle
+from safe_pickle import atomic_json_write, load_numpy_pickle
 from screen_agent import risk_reason as screen_risk_reason
 from phone_screen_agent import risk_reason as phone_risk_reason
 from voice_activation_agent import VoiceRecognitionAgent
@@ -80,6 +80,17 @@ class DocIndexTests(unittest.TestCase):
 
 
 class SafePickleTests(unittest.TestCase):
+    def test_atomic_json_profile_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "profile.json")
+            expected = {"features": [0.1, 0.2], "lock": True}
+
+            atomic_json_write(path, expected)
+
+            with open(path, "r", encoding="utf-8") as stream:
+                self.assertEqual(json.load(stream), expected)
+
+    def test_numpy_pickle_round_trip_remains_supported(self):
     def test_numpy_pickle_round_trip_remains_supported(self):
         import pickle
 

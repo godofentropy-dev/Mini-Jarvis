@@ -1,8 +1,8 @@
+import json
 import os
-import pickle
 import numpy as np
 
-from safe_pickle import load_numpy_pickle
+from safe_pickle import atomic_json_write, load_numpy_pickle
 import vision
 
 # face_recognition needs dlib, which is the hardest package to install on Windows.
@@ -15,7 +15,8 @@ except ImportError:
 # Next to this file (the old relative path depended on where jarvis.bat was started from,
 # so the saved face could "disappear" when launched from a different folder)
 BASE = os.path.dirname(os.path.abspath(__file__))
-ENCODINGS_FILE = os.path.join(BASE, "known_faces.pkl")
+ENCODINGS_FILE = os.path.join(BASE, "known_faces.json")
+LEGACY_ENCODINGS_FILE = os.path.join(BASE, "known_faces.pkl")
 TOLERANCE = 0.5          # lower = stricter. 0.6 is the library default and lets lookalikes through
 MAX_SIDE = 480           # frames are shrunk before analysis: much faster and cooler on a laptop
 
@@ -36,10 +37,16 @@ class FaceRecognitionAgent:
         return self.available and bool(self.known_encodings)
 
     def load_known_faces(self):
-        """Loads stored face encodings from disk."""
-        if os.path.exists(ENCODINGS_FILE):
+        """Loads the JSON profile, or safely migrates a legacy NumPy pickle profile."""
+        for path in (ENCODINGS_FILE, LEGACY_ENCODINGS_FILE):
+            if not os.path.exists(path):
+                continue
             try:
-                data = load_numpy_pickle(ENCODINGS_FILE, max_bytes=10_000_000)
+                if path.endswith(".json"):
+                    with open(path, "r", encoding="utf-8") as stream:
+                        data = json.load(stream)
+                else:
+                    data = load_numpy_pickle(path, max_bytes=10_000_000)
                 if not isinstance(data, dict):
                     raise ValueError("face profile must be a dictionary")
                 encodings = data.get("encodings", [])
@@ -56,17 +63,18 @@ class FaceRecognitionAgent:
                     raise ValueError("face profile contains an invalid name")
                 self.known_encodings = safe_encodings
                 self.known_names = names
-            except Exception as e:
-                print(f"Error loading known faces: {e}")
+                return
+            except Exception as exc:
+                print(f"Error loading known faces from {os.path.basename(path)}: {exc}")
 
     def save_known_face(self, name, encoding):
-        """Saves a new face encoding to disk (written to a temp file first so it cannot be corrupted)."""
-        self.known_encodings.append(encoding)
+        """Saves face encodings as JSON through an atomic replace."""
+        self.known_encodings.append(np.asarray(encoding, dtype=np.float64).reshape(-1))
         self.known_names.append(name)
-        tmp = ENCODINGS_FILE + ".tmp"
-        with open(tmp, "wb") as f:
-            pickle.dump({"encodings": self.known_encodings, "names": self.known_names}, f)
-        os.replace(tmp, ENCODINGS_FILE)
+        atomic_json_write(
+            ENCODINGS_FILE,
+            {"encodings": [vector.tolist() for vector in self.known_encodings], "names": self.known_names},
+        )
 
     @staticmethod
     def _to_array(img):

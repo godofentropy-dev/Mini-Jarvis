@@ -4,8 +4,10 @@ Pickle can execute arbitrary globals. This loader accepts only the small set of
 NumPy reconstruction primitives needed by Jarvis's own array profiles.
 """
 import codecs
+import json
 import os
 import pickle
+import tempfile
 
 import numpy as np
 
@@ -30,3 +32,22 @@ def load_numpy_pickle(path, max_bytes=10_000_000):
         raise pickle.UnpicklingError(f"profile is too large ({size} bytes)")
     with open(path, "rb") as stream:
         return _RestrictedNumpyUnpickler(stream).load()
+
+
+
+def atomic_json_write(path, data):
+    """Write a JSON profile beside its destination and atomically replace it."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temporary = tempfile.mkstemp(prefix=".jarvis-profile-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(data, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass

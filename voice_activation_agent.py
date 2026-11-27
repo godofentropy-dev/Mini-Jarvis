@@ -12,16 +12,17 @@ Jarvis starts as fast as before when no voice is registered.
 """
 import importlib
 import importlib.util
+import json
 import os
-import pickle
 import threading
-
-from safe_pickle import load_numpy_pickle
 
 import numpy as np
 
+from safe_pickle import atomic_json_write, load_numpy_pickle
+
 BASE = os.path.dirname(os.path.abspath(__file__))
-VOICE_PROFILE_FILE = os.path.join(BASE, "known_voice.pkl")
+VOICE_PROFILE_FILE = os.path.join(BASE, "known_voice.json")
+LEGACY_VOICE_PROFILE_FILE = os.path.join(BASE, "known_voice.pkl")
 SIMILARITY_THRESHOLD = 0.75   # cosine similarity needed to count as you. Lower = more forgiving.
 MIN_SECONDS = 0.8             # clips shorter than this can't be judged reliably, so they are let through
 
@@ -59,39 +60,44 @@ class VoiceRecognitionAgent:
 
     # ------------------------------------------------------------ persistence
     def _load(self):
-        if not os.path.exists(VOICE_PROFILE_FILE):
-            return
-        try:
-            data = load_numpy_pickle(VOICE_PROFILE_FILE, max_bytes=1_000_000)
-            if not isinstance(data, dict):
-                raise ValueError("voice profile must be a dictionary")
-            self._lock_on = bool(data.get("lock", False))
-            feats = data.get("features")
-            if feats is not None:
-                feats = np.asarray(feats, dtype=np.float32).reshape(-1)
-                if feats.size != 256 or not np.isfinite(feats).all():
-                    raise ValueError("voice profile has invalid embedding data")
-                n = float(np.linalg.norm(feats))
-                self.known_features = feats / n if n > 0 else None
-        except Exception as e:
-            # A present but unreadable profile must not silently turn off an enabled lock.
-            self._lock_on = True
-            print(f"Error loading voice profile: {e}")
+        for path in (VOICE_PROFILE_FILE, LEGACY_VOICE_PROFILE_FILE):
+            if not os.path.exists(path):
+                continue
+            try:
+                if path.endswith(".json"):
+                    with open(path, "r", encoding="utf-8") as stream:
+                        data = json.load(stream)
+                else:
+                    data = load_numpy_pickle(path, max_bytes=1_000_000)
+                if not isinstance(data, dict):
+                    raise ValueError("voice profile must be a dictionary")
+                self._lock_on = bool(data.get("lock", False))
+                feats = data.get("features")
+                if feats is not None:
+                    feats = np.asarray(feats, dtype=np.float32).reshape(-1)
+                    if feats.size != 256 or not np.isfinite(feats).all():
+                        raise ValueError("voice profile has invalid embedding data")
+                    n = float(np.linalg.norm(feats))
+                    self.known_features = feats / n if n > 0 else None
+                return
+            except Exception as exc:
+                # A present but unreadable profile must not silently turn off an enabled lock.
+                self._lock_on = True
+                print(f"Error loading voice profile {os.path.basename(path)}: {exc}")
 
     def _save(self):
-        tmp = VOICE_PROFILE_FILE + ".tmp"
-        with open(tmp, "wb") as f:
-            pickle.dump({"features": self.known_features, "lock": self._lock_on}, f)
-        os.replace(tmp, VOICE_PROFILE_FILE)
+        features = self.known_features.tolist() if self.known_features is not None else None
+        atomic_json_write(VOICE_PROFILE_FILE, {"features": features, "lock": self._lock_on})
 
     def forget_voice(self):
         self.known_features = None
         self._lock_on = False
-        try:
-            if os.path.exists(VOICE_PROFILE_FILE):
-                os.remove(VOICE_PROFILE_FILE)
-        except Exception as e:
-            print(f"Couldn't delete the voice profile: {e}")
+        for path in (VOICE_PROFILE_FILE, LEGACY_VOICE_PROFILE_FILE):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as e:
+                print(f"Couldn't delete the voice profile: {e}")
 
     # -------------------------------------------------------------- embedding
     def _ensure_models(self):

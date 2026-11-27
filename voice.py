@@ -2092,6 +2092,7 @@ class Ears:
         self.noise = 0.004
         self._kw_reset = self._clear_vad = False
         self.stream, self.src_sr = None, 16000
+        self.last_block_at = time.monotonic()
         self.silero, self._sbuf, self._sp = None, np.zeros(0, np.float32), 0.0
         if USE_SILERO and load_silero_vad is not None:
             try:
@@ -2187,6 +2188,7 @@ class Ears:
         last_dbg = time.time()
         while True:
             blk = self.q.get()
+            self.last_block_at = time.monotonic()
             lvl = float(np.sqrt(np.mean((blk.astype(np.float32) / 32768.0) ** 2)))
 
             if self._clear_vad:
@@ -7189,9 +7191,13 @@ def jarvis_loop():
 
                 S["awake"] = False
                 set_state("sleep")
-                audio = ears.next_utterance()
+                audio = ears.next_utterance(timeout=2)
                 if audio is None:
-                    time.sleep(0.1)
+                    stream = getattr(ears, "stream", None)
+                    last_block = getattr(ears, "last_block_at", 0.0)
+                    stream_active = bool(stream is not None and stream.active)
+                    if not stream_active or time.monotonic() - last_block > 10:
+                        raise RuntimeError("Microphone input stream stopped responding")
                     continue
                 loop_failures = 0
                 if phone_ringing_active() and not S["asleep"] and _phone_ring_command(audio):

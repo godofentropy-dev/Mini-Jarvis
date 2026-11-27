@@ -205,7 +205,7 @@ class SingleInstanceTests(unittest.TestCase):
             def recv(self, size):
                 return self.parts.pop(0)[:size] if self.parts else b""
 
-        self.assertEqual(_recv_exact(PartialSocket(), 9), b"JARVIS_ACK")
+        self.assertEqual(_recv_exact(PartialSocket(), 10), b"JARVIS_ACK")
 
     def test_bind_conflict_without_jarvis_listener_is_not_silently_accepted(self):
         from unittest.mock import patch

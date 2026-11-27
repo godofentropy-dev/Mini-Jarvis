@@ -6213,7 +6213,8 @@ def _route_impl(command):
               or handle_file_command(c) or handle_action(c) or handle_docqa_question(c)):
             return
     auto_pick(c or command)                                  # AUTO PERSONA: plain chat goes to whoever fits (follow-up or topic)
-    ask(command)
+    # Typed routing uses a normalized command, but the model must receive the original punctuation/code/math.
+    ask(S.get("raw_text") or command)
 
 
 # ================= AGENTS: goals, Nova's code runner, screen agent, macros =================

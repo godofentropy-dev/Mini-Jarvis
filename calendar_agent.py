@@ -308,6 +308,7 @@ def _iter_rule(start_wall, rule):
     d0 = start_wall.date() if is_dt else start_wall
     freq, step = rule["FREQ"], max(1, rule.get("INTERVAL", 1))
     byday, bymd, bymo = rule.get("BYDAY"), rule.get("BYMONTHDAY"), rule.get("BYMONTH")
+    pos = rule.get("BYSETPOS")
 
     def make(d):
         return datetime.combine(d, t) if is_dt else d

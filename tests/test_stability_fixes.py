@@ -113,7 +113,6 @@ class SafePickleTests(unittest.TestCase):
                 self.assertEqual(stream.read(), b"encrypted")
 
     def test_numpy_pickle_round_trip_remains_supported(self):
-    def test_numpy_pickle_round_trip_remains_supported(self):
         import pickle
 
         with tempfile.TemporaryDirectory() as directory:

@@ -11,6 +11,7 @@ from code_executor import solve as solve_generated_code
 from screen_agent import risk_reason as screen_risk_reason
 from phone_screen_agent import risk_reason as phone_risk_reason
 from voice_activation_agent import VoiceRecognitionAgent
+from jarvis_ui import claim_instance
 
 
 class DocIndexTests(unittest.TestCase):
@@ -73,6 +74,21 @@ class DocIndexTests(unittest.TestCase):
 
         self.assertEqual(loaded.items, [])
         self.assertEqual(loaded.vecs.shape, (0, 1))
+
+
+class SingleInstanceTests(unittest.TestCase):
+    def test_bind_conflict_without_jarvis_listener_is_not_silently_accepted(self):
+        from unittest.mock import patch
+
+        with patch("jarvis_ui.socket.socket") as socket_factory, patch(
+                "jarvis_ui.socket.create_connection", side_effect=ConnectionRefusedError):
+            fake_socket = socket_factory.return_value
+            fake_socket.bind.side_effect = OSError("address already in use")
+
+            with self.assertRaisesRegex(RuntimeError, "no running Jarvis instance"):
+                claim_instance(lambda: None)
+
+            fake_socket.close.assert_called_once()
 
 
 class CodeExecutionSafetyTests(unittest.TestCase):

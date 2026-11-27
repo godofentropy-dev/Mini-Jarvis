@@ -7,6 +7,8 @@ import numpy as np
 
 from jobs import DocIndex
 from self_healing_agent import SelfHealingAgent
+from screen_agent import risk_reason as screen_risk_reason
+from phone_screen_agent import risk_reason as phone_risk_reason
 
 
 class DocIndexTests(unittest.TestCase):
@@ -51,6 +53,21 @@ class DocIndexTests(unittest.TestCase):
 
         self.assertEqual(loaded.items, [])
         self.assertEqual(loaded.vecs.shape, (0, 1))
+
+
+class ScreenActionSafetyTests(unittest.TestCase):
+    def test_screen_enter_after_typing_requires_confirmation(self):
+        reason = screen_risk_reason({"action": "press", "key": "enter"}, [], ['typed "hello"'])
+        self.assertIn("submitting", reason)
+
+    def test_phone_enter_in_editable_field_requires_confirmation(self):
+        state = {"field": {"editable": True, "label": "Message"}}
+        reason = phone_risk_reason({"action": "key", "key": "enter"}, [], state)
+        self.assertIn("submitting", reason)
+
+    def test_enter_without_recent_text_is_not_flagged(self):
+        self.assertIsNone(screen_risk_reason({"action": "press", "key": "enter"}, [], []))
+        self.assertIsNone(phone_risk_reason({"action": "key", "key": "enter"}, [], {}))
 
 
 class SelfHealingPatchTests(unittest.TestCase):

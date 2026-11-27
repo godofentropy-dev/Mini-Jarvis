@@ -2112,6 +2112,7 @@ class Ears:
                 self.stream = sd.InputStream(device=dev, samplerate=rate, channels=1, dtype="int16",
                                              blocksize=int(rate * 0.05), callback=self._cb)
                 self.stream.start()
+                self.last_block_at = time.monotonic()
                 return info["name"]
             except Exception as e:
                 last, self.stream = e, None

@@ -21,7 +21,7 @@
 | Category | Details |
 | --- | --- |
 | **🧠 AI Brain** | Local inference through **Ollama** (llama3.2:3b); optional web-connected features use the internet |
-| **🔐 Voice Lock** | Responds **only to your voice** (Resemblyzer speaker verification) |
+| **🔐 Voice Lock** | Optional speaker verification for spoken commands; typed commands remain available |
 | **👥 6 AI Personas** | Each with unique voice, color, personality, and specialty |
 | **👁️ Vision** | Screen reading + camera input + drag-and-drop image analysis |
 | **💬 Messaging** | Reads/sends WhatsApp & Instagram via browser automation |

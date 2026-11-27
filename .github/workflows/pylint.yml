@@ -25,6 +25,12 @@ jobs:
         # Install project dependencies for import checking
         pip install -r requirements.txt || echo "Some deps failed, continuing..."
 
+    - name: Compile Python files
+      run: python -m compileall -q .
+
+    - name: Run unit tests
+      run: python -m unittest discover -s tests -v
+
     - name: Run Pylint (strict)
       run: |
         # Strict check: errors + warnings + conventions

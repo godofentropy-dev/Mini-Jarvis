@@ -64,6 +64,17 @@ ROWS = (("CPU", "cpu"), ("RAM", "ram"), ("DSK", "disk"), ("BAT", "bat"))
 _instance_sock = None
 
 
+def _recv_exact(sock, size):
+    """Read a fixed-size local IPC message even when TCP splits it across packets."""
+    chunks = bytearray()
+    while len(chunks) < size:
+        chunk = sock.recv(size - len(chunks))
+        if not chunk:
+            break
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
 def claim_instance(on_show):
     """True if we are the only copy. Otherwise wakes the running copy and returns False."""
     global _instance_sock
@@ -77,7 +88,7 @@ def claim_instance(on_show):
             with socket.create_connection(("127.0.0.1", INSTANCE_PORT), timeout=1) as c:
                 c.settimeout(1)
                 c.sendall(INSTANCE_PING)
-                response = c.recv(32)
+                response = _recv_exact(c, len(INSTANCE_ACK))
         except OSError as connect_error:
             raise RuntimeError(
                 f"Port {INSTANCE_PORT} is occupied, but no running Jarvis instance responded."
@@ -93,7 +104,8 @@ def claim_instance(on_show):
         while True:
             try:
                 conn, _ = s.accept()
-                message = conn.recv(32)
+                conn.settimeout(1)
+                message = _recv_exact(conn, len(INSTANCE_PING))
                 if message in (INSTANCE_PING, b"show"):
                     if message == INSTANCE_PING:
                         conn.sendall(INSTANCE_ACK)

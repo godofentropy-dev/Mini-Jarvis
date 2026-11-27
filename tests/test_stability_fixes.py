@@ -14,7 +14,7 @@ from safe_pickle import atomic_bytes_write, atomic_json_write, atomic_text_write
 from screen_agent import risk_reason as screen_risk_reason
 from phone_screen_agent import risk_reason as phone_risk_reason
 from voice_activation_agent import VoiceRecognitionAgent
-from jarvis_ui import claim_instance
+from jarvis_ui import _recv_exact, claim_instance
 from plugin_manager import PluginManager
 import planner_agent
 
@@ -197,6 +197,16 @@ class PluginLoadSafetyTests(unittest.TestCase):
 
 
 class SingleInstanceTests(unittest.TestCase):
+    def test_fixed_size_receive_handles_partial_tcp_reads(self):
+        class PartialSocket:
+            def __init__(self):
+                self.parts = [b"JAR", b"VIS_", b"ACK"]
+
+            def recv(self, size):
+                return self.parts.pop(0)[:size] if self.parts else b""
+
+        self.assertEqual(_recv_exact(PartialSocket(), 9), b"JARVIS_ACK")
+
     def test_bind_conflict_without_jarvis_listener_is_not_silently_accepted(self):
         from unittest.mock import patch
 

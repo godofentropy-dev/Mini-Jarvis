@@ -9,6 +9,7 @@ from jobs import DocIndex
 from self_healing_agent import SelfHealingAgent
 from code_executor import solve as solve_generated_code
 from download_agent import _validate_public_download_url
+from safe_pickle import load_numpy_pickle
 from screen_agent import risk_reason as screen_risk_reason
 from phone_screen_agent import risk_reason as phone_risk_reason
 from voice_activation_agent import VoiceRecognitionAgent
@@ -76,6 +77,37 @@ class DocIndexTests(unittest.TestCase):
 
         self.assertEqual(loaded.items, [])
         self.assertEqual(loaded.vecs.shape, (0, 1))
+
+
+class SafePickleTests(unittest.TestCase):
+    def test_numpy_pickle_round_trip_remains_supported(self):
+        import pickle
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "profile.pkl")
+            expected = {"features": np.asarray([0.1, 0.2], dtype=np.float32), "lock": True}
+            with open(path, "wb") as stream:
+                pickle.dump(expected, stream)
+
+            actual = load_numpy_pickle(path, max_bytes=100_000)
+
+            self.assertTrue(actual["lock"])
+            np.testing.assert_allclose(actual["features"], expected["features"])
+
+    def test_untrusted_global_is_rejected(self):
+        import pickle
+
+        class UnsafeGlobal:
+            def __reduce__(self):
+                return (os.system, ("this-command-must-never-run",))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "untrusted.pkl")
+            with open(path, "wb") as stream:
+                pickle.dump(UnsafeGlobal(), stream)
+
+            with self.assertRaises(pickle.UnpicklingError):
+                load_numpy_pickle(path, max_bytes=100_000)
 
 
 class DownloadSafetyTests(unittest.TestCase):

@@ -1,6 +1,7 @@
 import os
-import pickle
 import numpy as np
+
+from safe_pickle import load_numpy_pickle
 import vision
 
 # face_recognition needs dlib, which is the hardest package to install on Windows.
@@ -37,10 +38,23 @@ class FaceRecognitionAgent:
         """Loads stored face encodings from disk."""
         if os.path.exists(ENCODINGS_FILE):
             try:
-                with open(ENCODINGS_FILE, "rb") as f:
-                    data = pickle.load(f)
-                self.known_encodings = data.get("encodings", [])
-                self.known_names = data.get("names", [])
+                data = load_numpy_pickle(ENCODINGS_FILE, max_bytes=10_000_000)
+                if not isinstance(data, dict):
+                    raise ValueError("face profile must be a dictionary")
+                encodings = data.get("encodings", [])
+                names = data.get("names", [])
+                if not isinstance(encodings, list) or not isinstance(names, list) or len(encodings) != len(names):
+                    raise ValueError("face profile has mismatched encodings and names")
+                safe_encodings = []
+                for encoding in encodings:
+                    vector = np.asarray(encoding, dtype=np.float64).reshape(-1)
+                    if vector.size != 128 or not np.isfinite(vector).all():
+                        raise ValueError("face profile contains an invalid encoding")
+                    safe_encodings.append(vector)
+                if any(not isinstance(name, str) or not name.strip() for name in names):
+                    raise ValueError("face profile contains an invalid name")
+                self.known_encodings = safe_encodings
+                self.known_names = names
             except Exception as e:
                 print(f"Error loading known faces: {e}")
 

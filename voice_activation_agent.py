@@ -13,8 +13,9 @@ Jarvis starts as fast as before when no voice is registered.
 import importlib
 import importlib.util
 import os
-import pickle
 import threading
+
+from safe_pickle import load_numpy_pickle
 
 import numpy as np
 
@@ -60,15 +61,20 @@ class VoiceRecognitionAgent:
         if not os.path.exists(VOICE_PROFILE_FILE):
             return
         try:
-            with open(VOICE_PROFILE_FILE, "rb") as f:
-                data = pickle.load(f)
+            data = load_numpy_pickle(VOICE_PROFILE_FILE, max_bytes=1_000_000)
+            if not isinstance(data, dict):
+                raise ValueError("voice profile must be a dictionary")
+            self._lock_on = bool(data.get("lock", False))
             feats = data.get("features")
             if feats is not None:
                 feats = np.asarray(feats, dtype=np.float32).reshape(-1)
-                n = np.linalg.norm(feats)
+                if feats.size != 256 or not np.isfinite(feats).all():
+                    raise ValueError("voice profile has invalid embedding data")
+                n = float(np.linalg.norm(feats))
                 self.known_features = feats / n if n > 0 else None
-            self._lock_on = bool(data.get("lock", False))
         except Exception as e:
+            # A present but unreadable profile must not silently turn off an enabled lock.
+            self._lock_on = True
             print(f"Error loading voice profile: {e}")
 
     def _save(self):

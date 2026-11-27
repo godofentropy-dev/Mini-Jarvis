@@ -71,7 +71,8 @@ def risk_reason(action, elems, state=None, history=None):
             and action.get("action") in ("key", "tap")):
         return "confirming the next phone action after entering text"
     if (action.get("action") == "key" and str(action.get("key", "")).lower() == "enter"
-            and state and state.get("field", {}).get("editable")):
+            and state and isinstance(state.get("field"), dict)
+            and state["field"].get("editable")):
         return "submitting the text you just entered"
     if action.get("action") == "tap":
         try:

@@ -263,6 +263,9 @@ class ScreenActionSafetyTests(unittest.TestCase):
         self.assertIsNone(screen_risk_reason({"action": "press", "key": "enter"}, [], []))
         self.assertIsNone(phone_risk_reason({"action": "key", "key": "enter"}, [], {}, []))
 
+    def test_phone_enter_with_no_focused_field_is_safe(self):
+        self.assertIsNone(phone_risk_reason({"action": "key", "key": "enter"}, [], {"field": None}, []))
+
 
 class SelfHealingPatchTests(unittest.TestCase):
     def setUp(self):

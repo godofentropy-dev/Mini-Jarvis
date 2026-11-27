@@ -22,6 +22,8 @@ voice.py speaks the replies and does the asking: handle() returns a dict that is
 import difflib
 import json
 import os
+
+from safe_pickle import atomic_json_write
 import re
 import time
 
@@ -101,11 +103,8 @@ class NotesAgent:
 
     def _save(self):
         try:
-            tmp = self.path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=1)
-            os.replace(tmp, self.path)
-        except Exception:
+            atomic_json_write(self.path, self.data)
+        except OSError:
             pass
 
     # ----- data operations -----

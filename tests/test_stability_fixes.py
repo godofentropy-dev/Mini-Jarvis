@@ -17,7 +17,7 @@ from jobs import DocIndex
 from self_healing_agent import SelfHealingAgent
 from code_executor import solve as solve_generated_code
 from download_agent import _validate_public_download_url
-from safe_pickle import atomic_json_write, load_numpy_pickle
+from safe_pickle import atomic_bytes_write, atomic_json_write, atomic_text_write, load_numpy_pickle
 from screen_agent import risk_reason as screen_risk_reason
 from phone_screen_agent import risk_reason as phone_risk_reason
 from voice_activation_agent import VoiceRecognitionAgent
@@ -98,6 +98,19 @@ class SafePickleTests(unittest.TestCase):
 
             with open(path, "r", encoding="utf-8") as stream:
                 self.assertEqual(json.load(stream), expected)
+
+    def test_atomic_text_and_binary_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text_path = os.path.join(directory, "note.txt")
+            bytes_path = os.path.join(directory, "secret.bin")
+
+            atomic_text_write(text_path, "Jarvis state")
+            atomic_bytes_write(bytes_path, b"encrypted")
+
+            with open(text_path, "r", encoding="utf-8") as stream:
+                self.assertEqual(stream.read(), "Jarvis state")
+            with open(bytes_path, "rb") as stream:
+                self.assertEqual(stream.read(), b"encrypted")
 
     def test_numpy_pickle_round_trip_remains_supported(self):
     def test_numpy_pickle_round_trip_remains_supported(self):

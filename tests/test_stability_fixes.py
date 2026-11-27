@@ -12,6 +12,7 @@ from screen_agent import risk_reason as screen_risk_reason
 from phone_screen_agent import risk_reason as phone_risk_reason
 from voice_activation_agent import VoiceRecognitionAgent
 from jarvis_ui import claim_instance
+from plugin_manager import PluginManager
 
 
 class DocIndexTests(unittest.TestCase):
@@ -74,6 +75,35 @@ class DocIndexTests(unittest.TestCase):
 
         self.assertEqual(loaded.items, [])
         self.assertEqual(loaded.vecs.shape, (0, 1))
+
+
+class PluginLoadSafetyTests(unittest.TestCase):
+    def test_top_level_executable_code_is_rejected_before_import(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as plugin_dir:
+            marker = os.path.join(plugin_dir, "executed.txt")
+            path = os.path.join(plugin_dir, "unsafe_plugin.py")
+            source = (
+                "from pathlib import Path\n"
+                f"Path({marker!r}).write_text('ran', encoding='utf-8')\n"
+                "META = {'name': 'unsafe', 'triggers': ['unsafe']}\n"
+                "def run(ctx, command, match):\n    return 'unsafe'\n"
+            )
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write(source)
+            with patch("plugin_manager.PLUGIN_DIR", plugin_dir):
+                manager = PluginManager({})
+                ok, reason = manager.load_one(path)
+
+            self.assertFalse(ok)
+            self.assertIn("unsupported top-level statement", reason)
+            self.assertFalse(os.path.exists(marker))
+
+    def test_existing_phone_notifications_plugin_is_allowed(self):
+        path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "plugins", "phone_notifications.py")
+        valid, reason = __import__("plugin_manager")._validate_plugin_source(path)
+        self.assertTrue(valid, reason)
 
 
 class SingleInstanceTests(unittest.TestCase):

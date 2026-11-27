@@ -2370,7 +2370,7 @@ def confirm_input(timeout=15):
         while time.time() < end:
             try:
                 raw = text_q.get_nowait()
-                if raw.startswith("\\x00"):
+                if raw.startswith("\x00"):
                     deferred_events.append(raw)
                     continue
                 return " ".join(re.sub(r"[^a-z0-9' ]", " ", raw.lower()).split()), False
@@ -6956,7 +6956,7 @@ def text_loop():
             time.sleep(0.05)
             continue
         try:
-            if raw.startswith("\\x00"):
+            if raw.startswith("\x00"):
                 try:
                     handle_event(raw)
                 except Exception as e:

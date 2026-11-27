@@ -833,12 +833,29 @@ def _warm_second_model():
     threading.Thread(target=run, daemon=True).start()
 
 
+def _atomic_json_save(path, data, indent=None):
+    """Persist JSON through a same-directory temporary file and atomic replace."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temporary = tempfile.mkstemp(prefix=".jarvis-state-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(data, stream, indent=indent, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+
+
 def save_settings():
     try:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(SET, f)
+        _atomic_json_save(SETTINGS_FILE, SET)
     except Exception:
-        pass
+        traceback.print_exc()
 
 # ================= POP-UP NOTIFICATIONS (see notify_agent.py) =================
 # When you can't see or hear Jarvis (minimized, orb mode, hidden, asleep or the speaker is muted), anything that
@@ -877,8 +894,7 @@ def save_live_state():
             "asleep": S["asleep"],
             "timestamp": time.time()
         }
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
+        _atomic_json_save(STATE_FILE, state, indent=2)
     except Exception as e:
         print(f"Error saving live state: {e}")
 
@@ -955,8 +971,7 @@ if chromadb is not None:
 
 def save_profile():
     """Saves the user profile (name + any facts that could not go into the vector database)."""
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump({"profile": profile}, f, indent=2)
+    _atomic_json_save(MEMORY_FILE, {"profile": profile}, indent=2)
 
 
 def embed(text):
@@ -1191,18 +1206,51 @@ ALERT_INSTAGRAM = True       # set False if you'd rather not keep an Instagram t
 _alerts = {"wanted": MESSAGE_ALERTS}
 
 
+_social_alert_queue = queue.Queue(maxsize=20)
+_social_alert_worker_lock = threading.Lock()
+_social_alert_worker_started = False
+
+
+def _social_alert_worker():
+    """One bounded worker handles message alerts; bursts cannot create unlimited threads."""
+    while True:
+        text = _social_alert_queue.get()
+        try:
+            notify("Messages", text)
+            toast("jarvis", text, title="Messages")
+            if S["asleep"]:
+                ui.log_line("sys", text)
+                continue
+            with busy:
+                play_chime()
+                speak(text)
+        except Exception:
+            traceback.print_exc()
+        finally:
+            _social_alert_queue.task_done()
+
+
 def on_social_alert(text):
-    """Called from the messaging thread the moment a new message is spotted."""
-    def run():
-        notify("Messages", text)
-        toast("jarvis", text, title="Messages")
-        if S["asleep"]:
-            ui.log_line("sys", text)            # asleep: just show it, don't talk
+    """Queue message alerts without spawning one thread per incoming message."""
+    global _social_alert_worker_started
+    try:
+        _social_alert_queue.put_nowait(text)
+    except queue.Full:
+        # Keep the newest context when a burst outpaces speech playback.
+        try:
+            _social_alert_queue.get_nowait()
+            _social_alert_queue.task_done()
+        except queue.Empty:
+            pass
+        try:
+            _social_alert_queue.put_nowait(text)
+        except queue.Full:
             return
-        with busy:
-            play_chime()
-            speak(text)
-    threading.Thread(target=run, daemon=True).start()
+
+    with _social_alert_worker_lock:
+        if not _social_alert_worker_started:
+            _social_alert_worker_started = True
+            threading.Thread(target=_social_alert_worker, daemon=True, name="social-alerts").start()
 
 
 def start_message_alerts():

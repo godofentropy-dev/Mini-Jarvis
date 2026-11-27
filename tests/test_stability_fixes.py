@@ -247,7 +247,7 @@ class VoiceLockTests(unittest.TestCase):
 class ScreenActionSafetyTests(unittest.TestCase):
     def test_screen_enter_after_typing_requires_confirmation(self):
         reason = screen_risk_reason({"action": "press", "key": "enter"}, [], ['typed "hello"'])
-        self.assertIn("submitting", reason)
+        self.assertIn("confirming", reason)
 
     def test_phone_enter_in_editable_field_requires_confirmation(self):
         state = {"field": {"editable": True, "label": "Message"}}
